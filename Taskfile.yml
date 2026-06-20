@@ -1,0 +1,580 @@
+version: "3"
+
+vars:
+  COMPOSE_FILE: infrastructure/docker-compose.yml
+
+  # 👇 single source of truth for all services (expanded IAM-first architecture)
+  SERVICES: iam payment search notification analytics
+
+  # IAM-specific components
+  IAM_SERVICE: iam
+
+
+# =========================
+# CORE
+# =========================
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+
+# =========================
+# BOOTSTRAP / CLEAN
+# =========================
+
+  bootstrap:
+    desc: Generate full mono-repo structure (IAM + policy-ready)
+    cmds:
+      - mkdir -p docs scripts shared/core shared/db shared/security shared/observability shared/utils
+      - mkdir -p infrastructure/nginx infrastructure/postgres infrastructure/redis infrastructure/observability/grafana
+
+      # IAM-specific bootstrap directories
+      - mkdir -p services/iam/app/{api,core,domain,services,policy_engine,persistence,audit,events,policies}
+      - mkdir -p services/iam/tests
+
+      # other services scaffolding
+      - |
+        for s in {{.SERVICES}}; do
+          mkdir -p services/$s/app/api
+          mkdir -p services/$s/app/core
+          mkdir -p services/$s/app/models
+          mkdir -p services/$s/tests
+
+          touch services/$s/app/main.py
+          touch services/$s/pyproject.toml
+          touch services/$s/uv.lock
+          touch services/$s/.env.example
+        done
+
+      # IAM core files (important additions)
+      - touch services/iam/app/main.py
+      - touch services/iam/app/core/config.py
+      - touch services/iam/app/core/security.py
+
+      # policy engine skeleton
+      - touch services/iam/app/policy_engine/{evaluator.py,context.py,decision.py,effect.py,registry.py}
+
+      # audit + events
+      - touch services/iam/app/audit/{logger.py,events.py,sink.py}
+      - touch services/iam/app/events/{publisher.py,consumer.py,schemas.py}
+
+      # policies
+      - mkdir -p services/iam/app/policies/examples
+      - touch services/iam/app/policies/{schema.py}
+      - touch services/iam/app/policies/examples/{admin.json,user.json,payment.json}
+
+      # shared IAM SDK
+      - mkdir -p shared/security/auth shared/security/authorization
+      - touch shared/security/auth/{jwt.py,session.py,password.py}
+      - touch shared/security/authorization/{client.py,decorators.py,guards.py,types.py}
+
+      # root files
+      - touch README.md LICENSE main.py pyproject.toml .env.example
+
+      # infra files
+      - touch {{.COMPOSE_FILE}}
+
+    msg: "🚀 IAM-ready monorepo scaffold created"
+
+
+  clean:
+    desc: Remove generated project structure (safe reset)
+    cmds:
+      - rm -rf docs scripts shared services infrastructure
+      - rm -f README.md LICENSE main.py pyproject.toml .env.example
+    msg: "🧹 Clean reset done"
+
+
+# =========================
+# SERVICE OPERATIONS
+# =========================
+
+  new:
+    desc: Create a new service (NAME required)
+    cmds:
+      - |
+        mkdir -p services/{{.NAME}}/app/{api,core}
+        mkdir -p services/{{.NAME}}/tests
+        touch services/{{.NAME}}/app/main.py
+        touch services/{{.NAME}}/pyproject.toml
+        touch services/{{.NAME}}/uv.lock
+        touch services/{{.NAME}}/.env.example
+        echo "Created service: {{.NAME}}"
+
+
+# =========================
+# IAM BOOTSTRAP / OPERATIONS
+# =========================
+
+  iam:seed:
+    desc: Seed IAM with default roles, policies, and admin user
+    cmds:
+      - cd services/iam && uv run python -m app.scripts.seed_iam
+
+  iam:policy:sync:
+    desc: Sync policy definitions into DB
+    cmds:
+      - cd services/iam && uv run python -m app.scripts.sync_policies
+
+  iam:audit:replay:
+    desc: Replay audit logs (debug/forensics)
+    cmds:
+      - cd services/iam && uv run python -m app.scripts.replay_audit
+
+
+# =========================
+# DEV (DOCKER)
+# =========================
+
+  dev:
+    desc: Run all services
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} up --build
+
+
+  dev:down:
+    desc: Stop all services
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} down
+
+
+  dev:logs:
+    desc: Logs all services
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} logs -f
+
+
+  logs:
+    desc: Logs a specific service (SERVICE=iam)
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} logs -f {{.SERVICE}}
+
+
+  build:
+    desc: Build service (SERVICE required)
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} build {{.SERVICE}}
+
+
+  build:all:
+    desc: Build all services
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} build
+
+
+# =========================
+# TESTING
+# =========================
+
+  test:
+    desc: Run tests isolated within each microservice environment context (or just SERVICE, if given)
+    vars:
+      TARGET_SERVICES: '{{.SERVICE | default .SERVICES}}'
+    cmds:
+      - |
+        for s in {{.TARGET_SERVICES}}; do
+          echo "🧪 Running tests for services/$s..."
+          (
+            cd services/$s && \
+            uv run pytest
+          ) || [ $? -eq 5 ] || exit 1
+        done
+
+
+  test:one:
+    desc: Run tests for one service (SERVICE=iam)
+    cmds:
+      - cd services/{{.SERVICE}} && uv run pytest
+
+
+# =========================
+# LINT & FORMAT
+# =========================
+
+  lint:
+    desc: Lint all services (or just SERVICE, if given)
+    vars:
+      TARGET_SERVICES: '{{.SERVICE | default .SERVICES}}'
+    cmds:
+      - |
+        set -e
+        for s in {{.TARGET_SERVICES}}; do
+          echo "🔍 Linting $s"
+          (cd services/$s && uv run ruff check .)
+        done
+
+  typecheck:
+    desc: Run strict type checking with mypy across all services (or just SERVICE, if given)
+    vars:
+      TARGET_SERVICES: '{{.SERVICE | default .SERVICES}}'
+    cmds:
+      - |
+        set -e
+        for s in {{.TARGET_SERVICES}}; do
+          echo "🧪 Type checking services/$s..."
+          (cd services/$s && uv run mypy --explicit-package-bases .)
+        done
+
+  format:
+    desc: Format, sort imports, and clean up unused code across all services (or just SERVICE, if given)
+    vars:
+      TARGET_SERVICES: '{{.SERVICE | default .SERVICES}}'
+    cmds:
+      - |
+        for s in {{.TARGET_SERVICES}}; do
+          echo "✨ Linting and formatting services/$s..."
+          (
+            cd services/$s && \
+            uv run ruff check --select I --fix . && \
+            uv run ruff check --fix . && \
+            uv run ruff format .
+          )
+        done
+
+
+# =========================
+# DATABASE MIGRATIONS (ALEMBIC)
+# =========================
+
+  migrate:
+    desc: "Apply alembic migrations up to head (SERVICE=iam)"
+    requires:
+      vars: [SERVICE]
+    dir: services/{{.SERVICE}}
+    preconditions:
+      - sh: test -f alembic.ini
+        msg: "services/{{.SERVICE}}/alembic.ini not found — alembic isn't configured for this service."
+    cmds:
+      - uv run alembic upgrade head
+
+  migrate:downgrade:
+    desc: "Roll back alembic migrations (SERVICE=iam, REV=-1 by default — one step back)"
+    requires:
+      vars: [SERVICE]
+    dir: services/{{.SERVICE}}
+    vars:
+      REV: '{{.REV | default "-1"}}'
+    preconditions:
+      - sh: test -f alembic.ini
+        msg: "services/{{.SERVICE}}/alembic.ini not found — alembic isn't configured for this service."
+    cmds:
+      - uv run alembic downgrade {{.REV}}
+
+  migrate:revision:
+    desc: "Create a new alembic revision (SERVICE=iam MESSAGE='add x column')"
+    requires:
+      vars: [SERVICE, MESSAGE]
+    dir: services/{{.SERVICE}}
+    preconditions:
+      - sh: test -f alembic.ini
+        msg: "services/{{.SERVICE}}/alembic.ini not found — alembic isn't configured for this service."
+    cmds:
+      - uv run alembic revision --autogenerate -m "{{.MESSAGE}}"
+
+  migrate:current:
+    desc: "Show the current alembic revision applied to the database (SERVICE=iam)"
+    requires:
+      vars: [SERVICE]
+    dir: services/{{.SERVICE}}
+    preconditions:
+      - sh: test -f alembic.ini
+        msg: "services/{{.SERVICE}}/alembic.ini not found — alembic isn't configured for this service."
+    cmds:
+      - uv run alembic current
+
+  migrate:history:
+    desc: "Show full alembic migration history (SERVICE=iam)"
+    requires:
+      vars: [SERVICE]
+    dir: services/{{.SERVICE}}
+    preconditions:
+      - sh: test -f alembic.ini
+        msg: "services/{{.SERVICE}}/alembic.ini not found — alembic isn't configured for this service."
+    cmds:
+      - uv run alembic history --verbose
+
+
+# =========================
+# DOCKER SINGLE SERVICE OPS
+# =========================
+
+  docker:build:
+    desc: Build a single service (SERVICE=iam)
+    cmds:
+      - docker compose -f infrastructure/docker-compose.yml build {{.SERVICE}}
+
+  docker:up:
+    desc: Run a single service (SERVICE=iam)
+    cmds:
+      - docker compose -f infrastructure/docker-compose.yml up --build {{.SERVICE}}
+
+  docker:down:
+    desc: Stop a single service (SERVICE=iam)
+    cmds:
+      - docker compose -f infrastructure/docker-compose.yml stop {{.SERVICE}}
+
+  docker:logs:
+    desc: Logs single service (SERVICE=iam)
+    cmds:
+      - docker compose -f infrastructure/docker-compose.yml logs -f {{.SERVICE}}
+
+  docker:rebuild:
+    desc: Clean rebuild single service (SERVICE=iam)
+    cmds:
+      - docker compose -f infrastructure/docker-compose.yml build --no-cache {{.SERVICE}}
+
+
+# =========================
+# CLEANUP
+# =========================
+
+  clean:docker:
+    desc: Clean docker + caches
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} down -v
+      - docker system prune -f
+      - find . -type d -name "__pycache__" -exec rm -rf {} +
+      - find . -name "*.pyc" -delete
+
+
+  quality:
+    desc: "Code quality: Format, lint, and typecheck all services in a single pass"
+    cmds:
+      - task: format
+        vars: { SERVICE: "{{.SERVICE}}" }
+      - task: lint
+        vars: { SERVICE: "{{.SERVICE}}" }
+      - task: typecheck
+        vars: { SERVICE: "{{.SERVICE}}" }
+      - task: test
+        vars: { SERVICE: "{{.SERVICE}}" }
+
+
+# =========================
+# LOCAL CI
+# Mirrors .github/workflows/ci.yml exactly:
+#   Stage 1 — uv sync --all-groups   (remote: Install dependencies)
+#   Stage 2 — ruff check .           (remote: Run lint)
+#   Stage 3 — pytest -q              (remote: Run tests)
+# DATABASE_URL matches the remote runner env variable precisely.
+# =========================
+
+  ci-local:
+    desc: "Run the full CI pipeline locally for all active services (mirrors GitHub Actions ci.yml)"
+    summary: |
+      Replicates .github/workflows/ci.yml stage-by-stage for every service that
+      has a pyproject.toml. Exits on the first failure (fail-fast), identical to
+      the remote runner behaviour.
+
+      Active service matrix (mirrors ci.yml): iam
+      Override: CI_SERVICES="iam payment" task ci-local
+    vars:
+      # Mirrors the active matrix in .github/workflows/ci.yml — extend as services graduate
+      CI_SERVICES: '{{.CI_SERVICES | default "iam"}}'
+    env:
+      DATABASE_URL: "sqlite+aiosqlite:///test_db.sqlite"
+    preconditions:
+      - sh: command -v uv
+        msg: "'uv' is not installed. Run: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    cmds:
+      - |
+        set -e
+        passed=0
+        for s in {{.CI_SERVICES}}; do
+          if [ ! -f "services/$s/pyproject.toml" ]; then
+            echo "⏭  Skipping services/$s — no pyproject.toml (scaffolded but not active)"
+            continue
+          fi
+          echo ""
+          echo "══════════════════════════════════════════════════════"
+          echo "  CI LOCAL  ▶  services/$s"
+          echo "══════════════════════════════════════════════════════"
+          echo "  [1/3] Installing / syncing dependencies..."
+          (cd services/$s && uv sync --all-groups --quiet)
+          echo "  [2/3] Lint check (ruff check — read-only, matches remote)..."
+          (cd services/$s && uv run ruff check .)
+          echo "  [3/3] Test suite (pytest -q)..."
+          (cd services/$s && uv run pytest -q)
+          echo "  ✓ services/$s passed all CI checks"
+          passed=$((passed + 1))
+        done
+        echo ""
+        echo "══════════════════════════════════════════════════════"
+        printf "  CI LOCAL PASSED — %s service(s) clean\n" "$passed"
+        echo "══════════════════════════════════════════════════════"
+      # Remove the SQLite file the app lifespan creates during test startup
+      - find . -name "test_db.sqlite" -delete 2>/dev/null || true
+
+
+  ci-local:one:
+    desc: "Run the CI pipeline locally for a single service: task ci-local:one SERVICE=iam"
+    requires:
+      vars: [SERVICE]
+    dir: services/{{.SERVICE}}
+    env:
+      DATABASE_URL: "sqlite+aiosqlite:///test_db.sqlite"
+    preconditions:
+      - sh: command -v uv
+        msg: "'uv' is not installed. Run: curl -LsSf https://astral.sh/uv/install.sh | sh"
+      - sh: test -f pyproject.toml
+        msg: "services/{{.SERVICE}}/pyproject.toml not found — is SERVICE='{{.SERVICE}}' correct?"
+    cmds:
+      - echo "══════════════════════════════════════════════════════"
+      - echo "  CI LOCAL  ▶  services/{{.SERVICE}}"
+      - echo "══════════════════════════════════════════════════════"
+      - echo "  [1/3] Installing / syncing dependencies..."
+      - uv sync --all-groups --quiet
+      - echo "  [2/3] Lint check (ruff check — read-only, matches remote)..."
+      - uv run ruff check .
+      - echo "  [3/3] Test suite (pytest -q)..."
+      - uv run pytest -q
+      - echo "  ✓ services/{{.SERVICE}} passed all CI checks"
+      # Remove the SQLite file the app lifespan creates during test startup
+      - find . -name "test_db.sqlite" -delete 2>/dev/null || true
+
+
+# =========================
+# CI/CD EMULATION (act)
+# Runs GitHub Actions workflows inside Docker containers on the local machine,
+# consuming zero remote CI minutes and eliminating "works on my machine" drift.
+#
+# Runtime requirements (one-time setup):
+#   1. Docker Desktop running          — https://docs.docker.com/get-docker
+#   2. act installed                   — brew install act
+#   3. Secrets file present            — cp .secrets.local.example .secrets.local
+#
+# Configuration is read from .actrc (checked in) — no per-command flags needed
+# for platform, architecture, or pull policy. First run pulls the
+# catthehacker/ubuntu:act-latest image (~1.1 GB); subsequent runs are fast.
+#
+# Apple Silicon note: .actrc forces linux/amd64 via Rosetta 2 / QEMU to match
+# GitHub-hosted ubuntu-latest runners exactly. No extra setup required.
+# =========================
+
+  ci-emulate:
+    desc: "Emulate full GitHub Actions CI pipeline locally via act (all matrix services)"
+    summary: |
+      Runs .github/workflows/ci.yml inside a Docker container using act.
+      Mirrors the GitHub-hosted runner environment — same Ubuntu image,
+      same Python version, same DATABASE_URL, same fail-fast behaviour.
+
+      First run: pulls catthehacker/ubuntu:act-latest (~1.1 GB).
+      On Apple Silicon: runs as linux/amd64 via Rosetta 2 (see .actrc).
+
+      To target one service: task ci-emulate:one SERVICE=iam
+    preconditions:
+      - sh: command -v docker
+        msg: "Docker not found.\n  Install Docker Desktop: https://docs.docker.com/get-docker"
+      - sh: docker info >/dev/null 2>&1
+        msg: "Docker daemon is not running.\n  Start Docker Desktop and retry."
+      - sh: command -v act
+        msg: "act not installed.\n  macOS: brew install act\n  Linux: curl https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash\n  Docs:  https://github.com/nektos/act"
+      - sh: test -f .secrets.local
+        msg: ".secrets.local not found.\n  Create it from the template: cp .secrets.local.example .secrets.local\n  Then set GITHUB_TOKEN (dummy value is fine for CI-only runs)."
+    cmds:
+      - |
+        echo ""
+        echo "══════════════════════════════════════════════════════════"
+        echo "  CI EMULATE  ▶  act push → .github/workflows/ci.yml"
+        printf "  Host arch : %s  |  Container arch : linux/amd64\n" "$(uname -m)"
+        echo "══════════════════════════════════════════════════════════"
+      - |
+        act push \
+          --workflows .github/workflows/ci.yml \
+          --secret-file .secrets.local \
+          --env-file .env.act
+      - |
+        echo ""
+        echo "══════════════════════════════════════════════════════════"
+        echo "  CI EMULATE  ✓  workflow completed"
+        echo "══════════════════════════════════════════════════════════"
+
+
+  ci-emulate:one:
+    desc: "Emulate CI for one matrix service locally: task ci-emulate:one SERVICE=iam"
+    summary: |
+      Runs .github/workflows/ci.yml filtered to a single matrix service via
+      act's --matrix flag. Useful for fast feedback on a specific service
+      without waiting for all matrix entries to complete.
+
+      Example: task ci-emulate:one SERVICE=iam
+    requires:
+      vars: [SERVICE]
+    preconditions:
+      - sh: command -v docker
+        msg: "Docker not found.\n  Install Docker Desktop: https://docs.docker.com/get-docker"
+      - sh: docker info >/dev/null 2>&1
+        msg: "Docker daemon is not running.\n  Start Docker Desktop and retry."
+      - sh: command -v act
+        msg: "act not installed.\n  macOS: brew install act"
+      - sh: test -f .secrets.local
+        msg: ".secrets.local not found.\n  cp .secrets.local.example .secrets.local"
+      - sh: test -f services/{{.SERVICE}}/pyproject.toml
+        msg: "services/{{.SERVICE}}/pyproject.toml not found — is SERVICE='{{.SERVICE}}' correct?"
+    cmds:
+      - |
+        echo ""
+        echo "══════════════════════════════════════════════════════════"
+        echo "  CI EMULATE  ▶  act push → service: {{.SERVICE}}"
+        echo "══════════════════════════════════════════════════════════"
+      - |
+        act push \
+          --workflows .github/workflows/ci.yml \
+          --matrix service:{{.SERVICE}} \
+          --secret-file .secrets.local \
+          --env-file .env.act
+      - |
+        echo ""
+        echo "══════════════════════════════════════════════════════════"
+        echo "  CI EMULATE  ✓  service {{.SERVICE}} completed"
+        echo "══════════════════════════════════════════════════════════"
+
+
+  cd-emulate:
+    desc: "Emulate GitHub Actions CD pipeline locally via act (requires GHCR PAT with packages:write)"
+    summary: |
+      Runs .github/workflows/cd.yml inside a Docker container using act.
+      Builds the service image and attempts a real push to GHCR.
+
+      PREREQUISITES:
+        - GITHUB_TOKEN in .secrets.local must be a real PAT with packages:write scope.
+        - Docker socket is mounted into the container (--privileged) so docker build works.
+        - Dockerfile.service must exist at the repository root.
+
+      To dry-run without pushing:
+        ACT_FLAGS="--dry-run" task cd-emulate
+    preconditions:
+      - sh: command -v docker
+        msg: "Docker not found.\n  Install Docker Desktop: https://docs.docker.com/get-docker"
+      - sh: docker info >/dev/null 2>&1
+        msg: "Docker daemon is not running.\n  Start Docker Desktop and retry."
+      - sh: command -v act
+        msg: "act not installed.\n  macOS: brew install act"
+      - sh: test -f .secrets.local
+        msg: ".secrets.local not found.\n  cp .secrets.local.example .secrets.local\n  CD emulation requires a real GITHUB_TOKEN with packages:write scope."
+      - sh: test -f Dockerfile.service
+        msg: "Dockerfile.service not found at repository root — required by cd.yml."
+    vars:
+      ACT_FLAGS: '{{.ACT_FLAGS | default ""}}'
+    cmds:
+      - |
+        echo ""
+        echo "══════════════════════════════════════════════════════════"
+        echo "  CD EMULATE  ▶  act push → .github/workflows/cd.yml"
+        echo "  WARNING: Pushes real images to GHCR (use ACT_FLAGS=--dry-run to skip)."
+        echo "══════════════════════════════════════════════════════════"
+      - |
+        act push \
+          --workflows .github/workflows/cd.yml \
+          --secret-file .secrets.local \
+          --env-file .env.act \
+          --privileged \
+          {{.ACT_FLAGS}}
+      - |
+        echo ""
+        echo "══════════════════════════════════════════════════════════"
+        echo "  CD EMULATE  ✓  workflow completed"
+        echo "══════════════════════════════════════════════════════════"

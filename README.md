@@ -154,12 +154,12 @@ Benefits include:
 | Layer | Technology |
 |---------|---------|
 | API Gateway | Kong Gateway, Envoy |
-| Backend Services | Go, NestJS, Python |
+| Backend Services |Python Fastapi |
 | Databases | PostgreSQL |
 | Cache Layer | Redis |
 | Messaging | Kafka, RabbitMQ |
 | Containerization | Docker |
-| Orchestration | Kubernetes |
+| Orchestration | RabbitMQ |
 | CI/CD | GitHub Actions / Azure DevOps |
 | Monitoring | Prometheus, Grafana |
 | Logging | Loki, ELK Stack |
