@@ -70,7 +70,7 @@ class GoogleOAuthService:
         )
         user, event_type = await self._resolve_user(identity)
 
-        access_token, refresh_token = await self._auth_service.issue_new_session(
+        token_pair = await self._auth_service.issue_new_session(
             user, ip_address=ip_address, user_agent=user_agent
         )
         await self._audit(
@@ -80,7 +80,7 @@ class GoogleOAuthService:
             user_agent=user_agent,
             context={"google_subject": identity.subject},
         )
-        return access_token, refresh_token, user
+        return token_pair.access_token, token_pair.refresh_token, user
 
     async def _resolve_user(self, identity: GoogleIdentity) -> tuple[User, str]:
         existing_by_subject = await self._users.get_by_google_subject(identity.subject)

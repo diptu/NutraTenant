@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     password_reset_token_expire_minutes: int = 30
     organization_invitation_expire_minutes: int = 7 * 24 * 60
 
+    mfa_challenge_token_expire_minutes: int = 5
+    mfa_recovery_code_count: int = 8
+    # Fernet key encrypting TOTP secrets at rest (unlike a password, a TOTP
+    # secret can't be one-way hashed — verification needs the original
+    # value back). Dev-only default; override in any real deployment.
+    mfa_secret_encryption_key: str = "JsaKd0V4JCvvLuGZU7JCfzV559YLSa-uGe6hfgCTajg="
+
     google_client_id: str = ""
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:8000/api/v1/auth/google/callback"

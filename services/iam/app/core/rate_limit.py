@@ -8,14 +8,18 @@ path and test fixtures that want to reset state between tests, mirroring
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Protocol
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.core.config import get_settings
 from app.core.redis_client import try_build_redis_client
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,9 +63,21 @@ class RedisRateLimiter:
         self, key: str, *, limit: int, window_seconds: int
     ) -> RateLimitResult:
         full_key = f"ratelimit:{key}"
-        count = await self._redis.incr(full_key)
-        if count == 1:
-            await self._redis.expire(full_key, window_seconds)
+        try:
+            count = await self._redis.incr(full_key)
+            if count == 1:
+                await self._redis.expire(full_key, window_seconds)
+        except RedisError:
+            # try_build_redis_client only guards a malformed REDIS_URL at
+            # construction time; an unreachable server (no Redis running
+            # locally, a transient outage, ...) only surfaces here, on the
+            # first real command. Fail open rather than 500 the whole
+            # login path — an outage in the rate limiter's own backend
+            # must never block every login attempt.
+            logger.warning(
+                "Redis unreachable for rate limiting; allowing request", exc_info=True
+            )
+            return RateLimitResult(allowed=True)
 
         if count > limit:
             ttl = await self._redis.ttl(full_key)

@@ -11,6 +11,7 @@ surface before deciding what to do next.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
@@ -21,18 +22,27 @@ from app.core.token_blacklist import TokenBlacklist
 from app.domain.exceptions import (
     AccountLockedError,
     EmailAlreadyExistsError,
+    ForbiddenError,
     InvalidCredentialsError,
+    InvalidMfaCodeError,
     InvalidTokenError,
+    MfaAlreadyEnabledError,
+    MfaNotEnabledError,
     RateLimitExceededError,
     RefreshTokenReusedError,
+    TenantSelectionRequiredError,
     UserNotFoundError,
 )
 from app.domain.value_objects import Email
+from app.infrastructure.db.models.associations import UserOrganizationRole
 from app.infrastructure.db.models.audit_log import AuditLog
+from app.infrastructure.db.models.organization import Organization
 from app.infrastructure.db.models.password_reset_token import PasswordResetToken
 from app.infrastructure.db.models.refresh_token import RefreshToken
+from app.infrastructure.db.models.role import Role
 from app.infrastructure.db.models.user import User
 from app.infrastructure.db.repositories.audit_repo import AuditLogRepository
+from app.infrastructure.db.repositories.organization_repo import OrganizationRepository
 from app.infrastructure.db.repositories.password_reset_token_repo import (
     PasswordResetTokenRepository,
 )
@@ -40,9 +50,20 @@ from app.infrastructure.db.repositories.refresh_token_repo import RefreshTokenRe
 from app.infrastructure.db.repositories.user_repo import UserRepository
 from app.infrastructure.security.jwt import (
     create_access_token,
+    create_mfa_challenge_token,
     create_refresh_token,
     decode_access_token,
+    decode_mfa_challenge_token,
     decode_refresh_token,
+)
+from app.infrastructure.security.mfa import (
+    build_otpauth_uri,
+    decrypt_secret,
+    encrypt_secret,
+    generate_recovery_codes,
+    generate_totp_secret,
+    hash_recovery_code,
+    verify_totp_code,
 )
 from app.infrastructure.security.password import hash_password, verify_password
 from app.infrastructure.security.reset_token import (
@@ -55,6 +76,57 @@ def _aware(value: datetime) -> datetime:
     """Postgres' ``DateTime(timezone=True)`` round-trips tz-aware; SQLite (tests
     only) round-trips naive. Normalize before comparing against `datetime.now(UTC)`."""
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+# Per-challenge-token cap on OTP attempts (distinct from the per-account
+# `mfa-verify:{user.id}` limiter) — see AuthService.verify_mfa_and_login.
+_MFA_CHALLENGE_MAX_ATTEMPTS = 3
+
+
+def _mfa_challenge_blacklist_key(jti: uuid.UUID) -> str:
+    """Namespaced so a challenge token's jti can never collide with an
+    access token's jti in the shared TokenBlacklist keyspace."""
+    return f"mfa-challenge:{jti}"
+
+
+@dataclass(frozen=True, slots=True)
+class TokenPair:
+    """The output of one token-pair issuance — login, post-MFA verify, or a
+    refresh rotation. ``session_id`` is the new refresh token's own ``jti``;
+    there's no separate sessions table, the refresh_tokens row *is* the
+    durable session record (see RefreshToken)."""
+
+    access_token: str
+    refresh_token: str
+    session_id: uuid.UUID
+    issued_at: datetime
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class LoginResult:
+    """Either a completed login (``access_token``/``refresh_token`` set) or
+    an MFA challenge (``mfa_challenge_token`` set) the caller must redeem via
+    ``AuthService.verify_mfa_and_login`` before getting real tokens.
+
+    ``organization``/``role``/``permissions`` describe the tenant context the
+    session was bound to (see ``AuthService._resolve_tenant``) — all empty
+    when the account belongs to no organization. ``previous_last_login_at``
+    is the user's last-login timestamp *before* this one, for display only.
+    """
+
+    user: User
+    mfa_required: bool
+    access_token: str | None = None
+    refresh_token: str | None = None
+    mfa_challenge_token: str | None = None
+    organization: Organization | None = None
+    role: Role | None = None
+    permissions: list[str] = field(default_factory=list)
+    session_id: uuid.UUID | None = None
+    session_issued_at: datetime | None = None
+    session_expires_at: datetime | None = None
+    previous_last_login_at: datetime | None = None
 
 
 class AuthService:
@@ -73,6 +145,7 @@ class AuthService:
         self._refresh_tokens = RefreshTokenRepository(session)
         self._reset_tokens = PasswordResetTokenRepository(session)
         self._audit_log = AuditLogRepository(session)
+        self._orgs = OrganizationRepository(session)
 
     # -- registration ----------------------------------------------------
 
@@ -110,6 +183,44 @@ class AuthService:
         await self._audit(event_type="user.registered", user_id=user.id, context={})
         return user
 
+    # -- tenant resolution -------------------------------------------------
+
+    async def _resolve_tenant(
+        self, user_id: uuid.UUID, tenant_id: uuid.UUID | None
+    ) -> tuple[Organization | None, UserOrganizationRole | None]:
+        """Picks which organization (if any) a session is bound to.
+
+        - ``tenant_id`` given: must be one of the user's memberships, else
+          ``ForbiddenError`` (403) — the org exists, the account just can't
+          log into it.
+        - No ``tenant_id``, zero memberships: no tenant context at all (e.g.
+          a superuser or a user who hasn't joined an org yet) — not an error.
+        - No ``tenant_id``, exactly one membership: auto-selected.
+        - No ``tenant_id``, multiple memberships: ``TenantSelectionRequiredError``
+          (409) carrying the list to retry the login with.
+        """
+        organizations = await self._orgs.list_for_user(user_id)
+
+        if tenant_id is not None:
+            organization = next((o for o in organizations if o.id == tenant_id), None)
+            if organization is None:
+                raise ForbiddenError("You are not a member of this organization")
+        elif not organizations:
+            return None, None
+        elif len(organizations) == 1:
+            organization = organizations[0]
+        else:
+            raise TenantSelectionRequiredError(
+                organizations=[
+                    {"id": str(o.id), "tenant_id": o.slug, "name": o.name}
+                    for o in organizations
+                ]
+            )
+
+        membership = await self._orgs.get_membership(organization.id, user_id)
+        assert membership is not None  # list_for_user already proved membership
+        return organization, membership
+
     # -- password login ----------------------------------------------------
 
     async def login(
@@ -119,7 +230,8 @@ class AuthService:
         password: str,
         ip_address: str | None,
         user_agent: str | None,
-    ) -> tuple[str, str, User]:
+        tenant_id: uuid.UUID | None = None,
+    ) -> LoginResult:
         normalized_email = Email(email).value
 
         # Per-email, not global — one attacker hammering one account can't
@@ -163,22 +275,288 @@ class AuthService:
             )
             raise InvalidCredentialsError("Invalid email or password")
 
+        # Resolved (and any TenantSelectionRequiredError/ForbiddenError
+        # raised) before mutating any user state below — the request-scoped
+        # session rolls back on the exception either way, but this keeps
+        # "did this attempt even get past tenant resolution" unambiguous.
+        organization, membership = await self._resolve_tenant(user.id, tenant_id)
+
         user.failed_login_count = 0
         user.locked_until = None
-        user.last_login_at = datetime.now(UTC)
         user.updated_at = datetime.now(UTC)
 
-        access_token, refresh_token = await self.issue_new_session(
-            user, ip_address=ip_address, user_agent=user_agent
+        if user.mfa_enabled:
+            mfa_challenge_token = create_mfa_challenge_token(
+                self._settings,
+                user_id=user.id,
+                organization_id=organization.id if organization else None,
+            )
+            await self._audit(
+                event_type="auth.login.mfa_challenge_issued",
+                user_id=user.id,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                context={},
+            )
+            return LoginResult(
+                user=user,
+                mfa_required=True,
+                mfa_challenge_token=mfa_challenge_token,
+            )
+
+        # Login is actually completing now (no MFA step pending) — this is
+        # the point a "last login" should be recorded, not the password step
+        # above, so an MFA-pending attempt never counts as a completed login.
+        previous_last_login_at = user.last_login_at
+        user.last_login_at = datetime.now(UTC)
+
+        role = membership.role if membership else None
+        token_pair = await self.issue_new_session(
+            user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            organization=organization,
+            role=role,
         )
         await self._audit(
             event_type="auth.login.success",
             user_id=user.id,
             ip_address=ip_address,
             user_agent=user_agent,
-            context={},
+            context={"organization_id": str(organization.id) if organization else None},
         )
-        return access_token, refresh_token, user
+        return LoginResult(
+            user=user,
+            mfa_required=False,
+            access_token=token_pair.access_token,
+            refresh_token=token_pair.refresh_token,
+            organization=organization,
+            role=role,
+            permissions=sorted(p.code for p in role.permissions) if role else [],
+            session_id=token_pair.session_id,
+            session_issued_at=token_pair.issued_at,
+            session_expires_at=token_pair.expires_at,
+            previous_last_login_at=previous_last_login_at,
+        )
+
+    async def verify_mfa_and_login(
+        self,
+        *,
+        mfa_challenge_token: str,
+        code: str,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> LoginResult:
+        """Redeems an MFA challenge token (from ``login``) plus a TOTP/
+        recovery code for a real access/refresh token pair.
+
+        Two independent protections beyond just checking the code, both
+        scoped to *this one challenge* (not the account generally — that's
+        the separate ``mfa-verify:{user.id}`` limiter below):
+
+        - Single-use: the challenge's ``jti`` is blacklisted the moment it's
+          successfully redeemed, so a captured-but-already-used challenge
+          token can never be replayed even though it remains cryptographically
+          valid until its own ``exp``.
+        - Per-challenge lockout: at most ``_MFA_CHALLENGE_MAX_ATTEMPTS``
+          attempts against one challenge; the next one blacklists the ``jti``
+          outright (a hard lock, not a "retry after N seconds" throttle —
+          retrying never helps once a challenge is locked).
+        """
+        claims = decode_mfa_challenge_token(self._settings, mfa_challenge_token)
+
+        challenge_key = _mfa_challenge_blacklist_key(claims.jti)
+        if await self._token_blacklist.contains_jti(challenge_key):
+            raise InvalidTokenError(
+                "MFA challenge has already been used or has been locked"
+            )
+
+        user = await self._users.get_by_id(claims.subject_id)
+        if user is None or not user.is_active or not user.mfa_enabled:
+            raise InvalidTokenError("Invalid or expired MFA challenge")
+
+        # Per-account, not global — same reasoning as the password-login
+        # rate limit: bounds brute-forcing a 6-digit TOTP/recovery code
+        # without letting one attacker lock out anyone else's attempts.
+        rate_limit = await self._rate_limiter.hit(
+            f"mfa-verify:{user.id}",
+            limit=self._settings.rate_limit_max_requests,
+            window_seconds=self._settings.rate_limit_window_seconds,
+        )
+        if not rate_limit.allowed:
+            raise RateLimitExceededError(
+                retry_after_seconds=rate_limit.retry_after_seconds
+            )
+
+        challenge_ttl_seconds = self._settings.mfa_challenge_token_expire_minutes * 60
+        challenge_attempts = await self._rate_limiter.hit(
+            f"mfa-challenge-attempts:{claims.jti}",
+            limit=_MFA_CHALLENGE_MAX_ATTEMPTS,
+            window_seconds=challenge_ttl_seconds,
+        )
+        if not challenge_attempts.allowed:
+            await self._token_blacklist.add_jti(
+                challenge_key, ttl_seconds=challenge_ttl_seconds
+            )
+            await self._audit(
+                event_type="auth.mfa.challenge_locked",
+                user_id=user.id,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                context={"max_attempts": _MFA_CHALLENGE_MAX_ATTEMPTS},
+            )
+            raise InvalidTokenError(
+                "MFA challenge locked after too many failed attempts"
+            )
+
+        if not await self._consume_mfa_code(user, code):
+            await self._audit(
+                event_type="auth.mfa.login_failed",
+                user_id=user.id,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                context={},
+            )
+            raise InvalidMfaCodeError("Invalid MFA code")
+
+        # Single-use: burn the challenge the instant it's successfully
+        # redeemed, regardless of how much of its own TTL is left.
+        remaining_seconds = max(
+            int((claims.expires_at - datetime.now(UTC)).total_seconds()), 1
+        )
+        await self._token_blacklist.add_jti(
+            challenge_key, ttl_seconds=remaining_seconds
+        )
+
+        organization: Organization | None = None
+        role: Role | None = None
+        if claims.organization_id is not None:
+            organization = await self._orgs.get_by_id(claims.organization_id)
+            if organization is not None:
+                membership = await self._orgs.get_membership(
+                    claims.organization_id, user.id
+                )
+                # Membership may have been revoked since the challenge was
+                # issued — drop tenant context silently rather than fail a
+                # password+MFA-correct login over a stale claim.
+                organization = organization if membership is not None else None
+                role = membership.role if membership is not None else None
+
+        previous_last_login_at = user.last_login_at
+        user.last_login_at = datetime.now(UTC)
+
+        token_pair = await self.issue_new_session(
+            user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            organization=organization,
+            role=role,
+        )
+        await self._audit(
+            event_type="auth.login.success",
+            user_id=user.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            context={"mfa": True},
+        )
+        return LoginResult(
+            user=user,
+            mfa_required=False,
+            access_token=token_pair.access_token,
+            refresh_token=token_pair.refresh_token,
+            organization=organization,
+            role=role,
+            permissions=sorted(p.code for p in role.permissions) if role else [],
+            session_id=token_pair.session_id,
+            session_issued_at=token_pair.issued_at,
+            session_expires_at=token_pair.expires_at,
+            previous_last_login_at=previous_last_login_at,
+        )
+
+    async def _consume_mfa_code(self, user: User, code: str) -> bool:
+        """Tries the code as a live TOTP code first, then as a one-time
+        recovery code (consuming it on success)."""
+        assert user.mfa_secret_encrypted is not None
+        secret = decrypt_secret(self._settings, user.mfa_secret_encrypted)
+        if verify_totp_code(secret, code):
+            return True
+
+        code_hash = hash_recovery_code(code)
+        if code_hash in user.mfa_recovery_codes:
+            user.mfa_recovery_codes = [
+                stored for stored in user.mfa_recovery_codes if stored != code_hash
+            ]
+            user.updated_at = datetime.now(UTC)
+            return True
+
+        return False
+
+    # -- MFA enrollment ---------------------------------------------------
+
+    async def setup_mfa(self, *, user_id: uuid.UUID) -> tuple[str, str]:
+        """Starts (or restarts) enrollment: generates a fresh secret and
+        returns ``(secret, otpauth_uri)``. Not active until ``confirm_mfa``
+        verifies a code against it — calling this again before confirming
+        just replaces the pending secret."""
+        user = await self._users.get_by_id(user_id)
+        if user is None:
+            raise UserNotFoundError(f"No user with id '{user_id}'")
+        if user.mfa_enabled:
+            raise MfaAlreadyEnabledError("MFA is already enabled for this account")
+
+        secret = generate_totp_secret()
+        user.mfa_secret_encrypted = encrypt_secret(self._settings, secret)
+        user.updated_at = datetime.now(UTC)
+        await self._audit(
+            event_type="auth.mfa.setup_started", user_id=user.id, context={}
+        )
+        return secret, build_otpauth_uri(secret=secret, account_email=user.email)
+
+    async def confirm_mfa(self, *, user_id: uuid.UUID, code: str) -> list[str]:
+        """Verifies a code against the pending secret from ``setup_mfa``,
+        enables MFA, and returns a fresh batch of raw recovery codes —
+        shown to the caller exactly once; only their hashes are persisted."""
+        user = await self._users.get_by_id(user_id)
+        if user is None:
+            raise UserNotFoundError(f"No user with id '{user_id}'")
+        if user.mfa_enabled:
+            raise MfaAlreadyEnabledError("MFA is already enabled for this account")
+        if user.mfa_secret_encrypted is None:
+            raise MfaNotEnabledError("Call POST /auth/mfa/setup before confirming")
+
+        secret = decrypt_secret(self._settings, user.mfa_secret_encrypted)
+        if not verify_totp_code(secret, code):
+            raise InvalidMfaCodeError("Invalid MFA code")
+
+        recovery_codes = generate_recovery_codes(self._settings.mfa_recovery_code_count)
+        user.mfa_enabled = True
+        user.mfa_recovery_codes = [hash_recovery_code(c) for c in recovery_codes]
+        user.updated_at = datetime.now(UTC)
+        await self._audit(event_type="auth.mfa.enabled", user_id=user.id, context={})
+        return recovery_codes
+
+    async def disable_mfa(
+        self, *, user_id: uuid.UUID, current_password: str, code: str
+    ) -> None:
+        """Disabling lowers account security, so it's gated the same way as
+        a password change: the current password *and* a live MFA code."""
+        user = await self._users.get_by_id(user_id)
+        if user is None:
+            raise UserNotFoundError(f"No user with id '{user_id}'")
+        if not user.mfa_enabled:
+            raise MfaNotEnabledError("MFA is not enabled for this account")
+        if user.password_hash is None or not verify_password(
+            current_password, user.password_hash
+        ):
+            raise InvalidCredentialsError("Invalid password")
+        if not await self._consume_mfa_code(user, code):
+            raise InvalidMfaCodeError("Invalid MFA code")
+
+        user.mfa_enabled = False
+        user.mfa_secret_encrypted = None
+        user.mfa_recovery_codes = []
+        user.updated_at = datetime.now(UTC)
+        await self._audit(event_type="auth.mfa.disabled", user_id=user.id, context={})
 
     async def _record_failed_login(
         self, user: User, *, ip_address: str | None, user_agent: str | None
@@ -210,19 +588,32 @@ class AuthService:
             )
 
     async def issue_new_session(
-        self, user: User, *, ip_address: str | None, user_agent: str | None
-    ) -> tuple[str, str]:
-        """Start a brand-new rotation family — used by password login and by
-        the Google OIDC callback once an identity has been resolved to a user."""
+        self,
+        user: User,
+        *,
+        ip_address: str | None,
+        user_agent: str | None,
+        organization: Organization | None = None,
+        role: Role | None = None,
+    ) -> TokenPair:
+        """Start a brand-new rotation family — used by password login, the
+        post-MFA verify step, and the Google OIDC callback once an identity
+        has been resolved to a user. ``organization``/``role`` are omitted
+        by the Google flow today (it has no tenant-resolution step yet)."""
         return await self._issue_token_pair(
-            user, family_id=uuid.uuid4(), ip_address=ip_address, user_agent=user_agent
+            user,
+            family_id=uuid.uuid4(),
+            ip_address=ip_address,
+            user_agent=user_agent,
+            organization=organization,
+            role=role,
         )
 
     # -- refresh token rotation ---------------------------------------------
 
     async def refresh(
         self, *, refresh_token: str, ip_address: str | None, user_agent: str | None
-    ) -> tuple[str, str]:
+    ) -> TokenPair:
         claims = decode_refresh_token(self._settings, refresh_token)
         stored = await self._refresh_tokens.get_by_id(claims.jti)
 
@@ -247,12 +638,31 @@ class AuthService:
         if user is None or not user.is_active:
             raise UserNotFoundError("Refresh token's user is no longer valid")
 
-        access_token, refresh_token_str = await self._issue_token_pair(
+        # Re-resolve the tenant fresh from the DB on every rotation (see
+        # migration 0010) rather than trusting the prior access token's
+        # tenant_id/role claims — keeps them from going stale if role/
+        # membership changed since the last rotation. Membership having been
+        # revoked since just drops tenant context, same as in
+        # verify_mfa_and_login, rather than failing the refresh outright.
+        organization: Organization | None = None
+        role: Role | None = None
+        if stored.organization_id is not None:
+            organization = await self._orgs.get_by_id(stored.organization_id)
+            if organization is not None:
+                membership = await self._orgs.get_membership(
+                    stored.organization_id, user.id
+                )
+                organization = organization if membership is not None else None
+                role = membership.role if membership is not None else None
+
+        token_pair = await self._issue_token_pair(
             user,
             family_id=stored.family_id,
             ip_address=ip_address,
             user_agent=user_agent,
             rotates=stored,
+            organization=organization,
+            role=role,
         )
         await self._audit(
             event_type="auth.refresh.rotated",
@@ -261,7 +671,7 @@ class AuthService:
             user_agent=user_agent,
             context={"family_id": str(stored.family_id)},
         )
-        return access_token, refresh_token_str
+        return token_pair
 
     async def _issue_token_pair(
         self,
@@ -271,20 +681,22 @@ class AuthService:
         ip_address: str | None,
         user_agent: str | None,
         rotates: RefreshToken | None = None,
-    ) -> tuple[str, str]:
+        organization: Organization | None = None,
+        role: Role | None = None,
+    ) -> TokenPair:
         new_jti = uuid.uuid4()
-        expires_at = datetime.now(UTC) + timedelta(
-            days=self._settings.refresh_token_expire_days
-        )
+        issued_at = datetime.now(UTC)
+        expires_at = issued_at + timedelta(days=self._settings.refresh_token_expire_days)
 
         new_row = RefreshToken(
             id=new_jti,
             user_id=user.id,
             family_id=family_id,
-            issued_at=datetime.now(UTC),
+            issued_at=issued_at,
             expires_at=expires_at,
             user_agent=user_agent,
             ip_address=ip_address,
+            organization_id=organization.id if organization else None,
         )
         self._refresh_tokens.add(new_row)
 
@@ -295,7 +707,14 @@ class AuthService:
         await self._session.flush()
 
         access_token = create_access_token(
-            self._settings, user_id=user.id, attributes=user.attributes
+            self._settings,
+            user_id=user.id,
+            attributes=user.attributes,
+            tenant_id=organization.slug if organization else None,
+            role=role.name if role else None,
+        )
+        access_expires_at = issued_at + timedelta(
+            minutes=self._settings.access_token_expire_minutes
         )
         refresh_token_str = create_refresh_token(
             self._settings,
@@ -304,7 +723,13 @@ class AuthService:
             family_id=family_id,
             expires_at=expires_at,
         )
-        return access_token, refresh_token_str
+        return TokenPair(
+            access_token=access_token,
+            refresh_token=refresh_token_str,
+            session_id=new_jti,
+            issued_at=issued_at,
+            expires_at=access_expires_at,
+        )
 
     # -- logout --------------------------------------------------------------
 

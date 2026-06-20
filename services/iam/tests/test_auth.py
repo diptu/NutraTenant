@@ -97,7 +97,10 @@ class TestLoginRegression:
         assert response.status_code == 200
         data = response.json()
         assert "access_token" in data
-        assert "refresh_token" not in data  # cookie-only, never in the body
+        # Set in both places: the httponly cookie (browser clients) and the
+        # JSON body (non-browser clients with no cookie jar) — see
+        # RefreshRequest in app/api/v1/schemas/auth.py.
+        assert data["refresh_token"]
         assert data["token_type"].lower() == "bearer"
         assert "refresh_token" in response.cookies
 

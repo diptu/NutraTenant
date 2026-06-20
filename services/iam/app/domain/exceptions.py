@@ -28,6 +28,10 @@ class UserAlreadyMemberError(AlreadyExistsError):
     """The user is already a member of this organization."""
 
 
+class MfaAlreadyEnabledError(AlreadyExistsError):
+    """MFA setup/confirm was attempted on an account that already has it enabled."""
+
+
 class ResourceAlreadyExistsError(AlreadyExistsError):
     """A resource with this name already exists."""
 
@@ -57,6 +61,12 @@ class InvalidTokenError(DomainError):
     """A JWT/refresh/reset token failed signature, claim, or lookup validation."""
 
 
+class InvalidMfaCodeError(DomainError):
+    """A TOTP code or recovery code failed verification — distinct from
+    ``InvalidTokenError`` since no token is involved, just a wrong/expired
+    one-time code; gets its own audit event type at the call site."""
+
+
 class AccountLockedError(DomainError):
     """Login blocked by the brute-force lockout policy."""
 
@@ -72,6 +82,18 @@ class RateLimitExceededError(DomainError):
         self.retry_after_seconds = retry_after_seconds
         super().__init__(
             f"Rate limit exceeded. Retry after {retry_after_seconds} seconds."
+        )
+
+
+class TenantSelectionRequiredError(DomainError):
+    """Login succeeded but the user belongs to more than one organization and
+    no ``tenant_id`` was given to disambiguate — 409, carrying the list of
+    organizations the caller can retry the login with."""
+
+    def __init__(self, organizations: list[dict]) -> None:
+        self.organizations = organizations
+        super().__init__(
+            "Multiple tenants available for this account; specify tenant_id to continue"
         )
 
 
@@ -101,6 +123,11 @@ class PolicyNotFoundError(DomainError):
 
 class InvitationNotFoundError(DomainError):
     pass
+
+
+class MfaNotEnabledError(DomainError):
+    """MFA confirm/disable/login-verify was attempted without an active
+    (or pending) enrollment to act on."""
 
 
 class RoleNotAssignedError(DomainError):

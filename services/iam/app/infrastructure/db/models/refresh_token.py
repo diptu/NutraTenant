@@ -48,5 +48,17 @@ class RefreshToken(Base):
         nullable=True,
     )
 
+    # Which tenant this session is bound to (set once at issuance, carried
+    # forward unchanged on every rotation) — lets `refresh()` re-resolve
+    # role/permissions fresh from the DB on every rotation instead of the
+    # access token's tenant_id/role claims silently going stale after one
+    # refresh cycle. NULL for sessions with no tenant context (e.g. a user
+    # with zero organizations at login time).
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)

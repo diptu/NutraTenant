@@ -61,6 +61,18 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # TOTP-based MFA. The secret is encrypted at rest (Fernet, see
+    # app/infrastructure/security/mfa.py) rather than hashed like a
+    # password — verification needs the original value back. Not set
+    # (mfa_enabled=False) until a setup/confirm round-trip succeeds.
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    mfa_secret_encrypted: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # sha256 hashes of one-time recovery codes — consumed (removed from the
+    # list) on use, same one-way-hash treatment as a password.
+    mfa_recovery_codes: Mapped[list[str]] = mapped_column(
+        PortableJSONB, nullable=False, default=list, server_default="[]"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
