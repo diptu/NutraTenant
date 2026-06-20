@@ -1,0 +1,47 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+  push:
+    branches: ['*']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # ELEVATE ENVIRONMENT VARIABLES HERE
+    env:
+      DATABASE_URL: "sqlite+aiosqlite:///test_db.sqlite"
+
+    strategy:
+      matrix:
+        # service: [iam, payment, search, notification, analytics]
+        service: [iam]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        working-directory: services/${{ matrix.service }}
+        run: uv sync --all-groups
+
+      - name: Run lint (ruff)
+        working-directory: services/${{ matrix.service }}
+        # Point directly to the virtual environment binary
+        run: .venv/bin/ruff check .
+
+      - name: Run tests
+        working-directory: services/${{ matrix.service }}
+        # Point directly to the virtual environment binary
+        run: .venv/bin/pytest -q
+        env:
+          # Matches the dynamic database configuration of your conftest.py
+          DATABASE_URL: sqlite+aiosqlite:///test_db.sqlite

@@ -1,3 +1,15 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pylint.d/
+.pytest_cache/
+.coverage
+htmlcov/
+# NOTE: uv.lock is intentionally NOT ignored — it must be committed
+# to guarantee deterministic dependency trees across environments.
+
 # Logs
 logs
 *.log

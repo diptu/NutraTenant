@@ -1,0 +1,71 @@
+version: "3.8"
+
+services:
+  # ============================================================
+  # SYSTEM APPLICATION SERVICES (MAPPED VIA LOCAL .ENV FILES)
+  # ============================================================
+  iam:
+    build:
+      context: ..
+      dockerfile: Dockerfile.service
+      args:
+        SERVICE_NAME: iam
+        SERVICE_PATH: services/iam
+    ports:
+      - "8001:8000"
+    # 👇 Automatically pulls DATABASE_URL and SECRET_KEY from your local file
+    env_file:
+      - ../services/iam/.env
+    restart: unless-stopped
+
+  payment:
+    build:
+      context: ..
+      dockerfile: Dockerfile.service
+      args:
+        SERVICE_NAME: payment
+        SERVICE_PATH: services/payment
+    ports:
+      - "8002:8000"
+    env_file:
+      - ../services/payment/.env
+    restart: unless-stopped
+
+  search:
+    build:
+      context: ..
+      dockerfile: Dockerfile.service
+      args:
+        SERVICE_NAME: search
+        SERVICE_PATH: services/search
+    ports:
+      - "8003:8000"
+    env_file:
+      - ../services/search/.env
+    restart: unless-stopped
+
+  notification:
+    build:
+      context: ..
+      dockerfile: Dockerfile.service
+      args:
+        SERVICE_NAME: notification
+        SERVICE_PATH: services/notification
+    ports:
+      - "8004:8000"
+    env_file:
+      - ../services/notification/.env
+    restart: unless-stopped
+
+  analytics:
+    build:
+      context: ..
+      dockerfile: Dockerfile.service
+      args:
+        SERVICE_NAME: analytics
+        SERVICE_PATH: services/analytics
+    ports:
+      - "8005:8000"
+    env_file:
+      - ../services/analytics/.env
+    restart: unless-stopped
