@@ -2,9 +2,6 @@
 
 import uuid
 
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
-
 from app.infrastructure.db.models.associations import (
     RolePermission,
     UserOrganizationRole,
@@ -12,6 +9,8 @@ from app.infrastructure.db.models.associations import (
 from app.infrastructure.db.models.role import Role
 from app.infrastructure.db.models.user_role import UserRole
 from app.infrastructure.db.repositories.base_repository import BaseRepository
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 
 class RoleRepository(BaseRepository[Role]):
@@ -25,16 +24,21 @@ class RoleRepository(BaseRepository[Role]):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def get_by_code_in_org(
-        self, organization_id: uuid.UUID, code: str
-    ) -> Role | None:
+    async def get_by_code_in_org(self, organization_id: uuid.UUID, code: str) -> Role | None:
         """Org-scoped lookup — role codes are only unique *within* an organization
         (migration 0002's partial unique indexes), never globally."""
-        stmt = select(Role).where(
-            Role.organization_id == organization_id, Role.code == code
-        )
+        stmt = select(Role).where(Role.organization_id == organization_id, Role.code == code)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def get_by_name_in_org(self, organization_id: uuid.UUID, name: str) -> Role | None:
+        """Fallback for callers that only have a role's *display* name (e.g.
+        an admin-facing form posting "Member"/"Admin"), not its `code`. Not
+        guaranteed unique by any DB constraint — `name` has no uniqueness
+        index, so this returns whichever match comes back first."""
+        stmt = select(Role).where(Role.organization_id == organization_id, Role.name == name)
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
 
     async def list_all_global(self) -> list[Role]:
         """Every global (organization_id IS NULL) role — the coarse-grained
@@ -48,9 +52,7 @@ class RoleRepository(BaseRepository[Role]):
         references this role — checked at the application level since SQLite
         (tests) doesn't enforce the FK ``ondelete=RESTRICT`` that protects this
         in Postgres."""
-        org_stmt = select(UserOrganizationRole.id).where(
-            UserOrganizationRole.role_id == role_id
-        )
+        org_stmt = select(UserOrganizationRole.id).where(UserOrganizationRole.role_id == role_id)
         if (await self._session.execute(org_stmt)).first() is not None:
             return True
 
@@ -61,11 +63,7 @@ class RoleRepository(BaseRepository[Role]):
         stmt = (
             select(Role)
             .where(Role.id == role_id)
-            .options(
-                selectinload(Role.role_permissions).selectinload(
-                    RolePermission.permission
-                )
-            )
+            .options(selectinload(Role.role_permissions).selectinload(RolePermission.permission))
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()

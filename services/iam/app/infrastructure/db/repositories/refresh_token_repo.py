@@ -5,10 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import update
-
 from app.infrastructure.db.models.refresh_token import RefreshToken
 from app.infrastructure.db.repositories.base_repository import BaseRepository
+from sqlalchemy import update
 
 
 class RefreshTokenRepository(BaseRepository[RefreshToken]):
@@ -25,9 +24,7 @@ class RefreshTokenRepository(BaseRepository[RefreshToken]):
         """
         stmt = (
             update(RefreshToken)
-            .where(
-                RefreshToken.family_id == family_id, RefreshToken.revoked_at.is_(None)
-            )
+            .where(RefreshToken.family_id == family_id, RefreshToken.revoked_at.is_(None))
             .values(revoked_at=datetime.now(UTC))
         )
         await self._session.execute(stmt)

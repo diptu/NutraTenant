@@ -9,10 +9,9 @@ from __future__ import annotations
 import time
 from typing import Protocol
 
-from redis.asyncio import Redis
-
 from app.core.config import get_settings
 from app.core.redis_client import try_build_redis_client
+from redis.asyncio import Redis
 
 
 class PermissionCache(Protocol):
@@ -53,9 +52,7 @@ class RedisPermissionCache:
         return set(text.split(self._SEPARATOR)) if text else set()
 
     async def set(self, key: str, value: set[str], *, ttl_seconds: int) -> None:
-        await self._redis.set(
-            f"permcache:{key}", self._SEPARATOR.join(value), ex=ttl_seconds
-        )
+        await self._redis.set(f"permcache:{key}", self._SEPARATOR.join(value), ex=ttl_seconds)
 
 
 _permission_cache: PermissionCache | None = None
@@ -65,11 +62,7 @@ def get_permission_cache() -> PermissionCache:
     global _permission_cache
     if _permission_cache is None:
         client = try_build_redis_client(get_settings())
-        _permission_cache = (
-            RedisPermissionCache(client)
-            if client is not None
-            else InMemoryPermissionCache()
-        )
+        _permission_cache = RedisPermissionCache(client) if client is not None else InMemoryPermissionCache()
     return _permission_cache
 
 

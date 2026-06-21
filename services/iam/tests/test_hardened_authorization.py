@@ -11,9 +11,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
-
 from app.api.v1.dependencies import get_token_cache, require_global_role
 from app.core.config import get_settings
 from app.core.context_middleware import is_in_corporate_range
@@ -23,6 +20,8 @@ from app.infrastructure.db.models.policy_evaluation_log import PolicyEvaluationL
 from app.infrastructure.db.models.user import User
 from app.infrastructure.security.reset_token import hash_reset_token
 from app.infrastructure.security.token_cache import InMemoryTokenCache
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
 
@@ -61,9 +60,7 @@ async def _register_and_login(client: AsyncClient, email: str) -> str:
         "/api/v1/auth/register",
         json={"email": email, "password": _PASSWORD, "full_name": None},
     )
-    response = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": _PASSWORD}
-    )
+    response = await client.post("/api/v1/auth/login", json={"email": email, "password": _PASSWORD})
     return response.json()["access_token"]
 
 
@@ -72,9 +69,7 @@ def _auth(token: str) -> dict:
 
 
 async def _make_superuser(db_session, email: str) -> None:
-    user = (
-        await db_session.execute(select(User).where(User.email == email))
-    ).scalar_one()
+    user = (await db_session.execute(select(User).where(User.email == email))).scalar_one()
     user.is_superuser = True
     await db_session.commit()
 
@@ -130,12 +125,8 @@ async def test_change_password_wrong_current_password_rejected(client_ctx):
     assert response.status_code == 401
 
 
-async def test_forgot_password_unknown_email_same_generic_response(
-    client_ctx, debug_mode
-):
-    response = await client_ctx.post(
-        "/api/v1/auth/forgot-password", json={"email": "nobody@example.com"}
-    )
+async def test_forgot_password_unknown_email_same_generic_response(client_ctx, debug_mode):
+    response = await client_ctx.post("/api/v1/auth/forgot-password", json={"email": "nobody@example.com"})
     assert response.status_code == 200
     assert response.json()["reset_token"] is None
     assert "message" in response.json()
@@ -143,27 +134,21 @@ async def test_forgot_password_unknown_email_same_generic_response(
 
 async def test_forgot_password_returns_token_only_in_debug_mode(client_ctx, debug_mode):
     await _register_and_login(client_ctx, "alice@example.com")
-    response = await client_ctx.post(
-        "/api/v1/auth/forgot-password", json={"email": "alice@example.com"}
-    )
+    response = await client_ctx.post("/api/v1/auth/forgot-password", json={"email": "alice@example.com"})
     assert response.status_code == 200
     assert response.json()["reset_token"] is not None
 
 
 async def test_forgot_password_no_token_leaked_outside_debug_mode(client_ctx):
     await _register_and_login(client_ctx, "alice@example.com")
-    response = await client_ctx.post(
-        "/api/v1/auth/forgot-password", json={"email": "alice@example.com"}
-    )
+    response = await client_ctx.post("/api/v1/auth/forgot-password", json={"email": "alice@example.com"})
     assert response.status_code == 200
     assert response.json()["reset_token"] is None
 
 
 async def test_reset_password_full_flow_then_old_password_fails(client_ctx, debug_mode):
     await _register_and_login(client_ctx, "alice@example.com")
-    forgot = await client_ctx.post(
-        "/api/v1/auth/forgot-password", json={"email": "alice@example.com"}
-    )
+    forgot = await client_ctx.post("/api/v1/auth/forgot-password", json={"email": "alice@example.com"})
     raw_token = forgot.json()["reset_token"]
 
     reset = await client_ctx.post(
@@ -195,9 +180,7 @@ async def test_reset_password_invalid_token_rejected(client_ctx):
 async def test_reset_password_token_is_single_use(client_ctx, debug_mode):
     await _register_and_login(client_ctx, "alice@example.com")
     raw_token = (
-        await client_ctx.post(
-            "/api/v1/auth/forgot-password", json={"email": "alice@example.com"}
-        )
+        await client_ctx.post("/api/v1/auth/forgot-password", json={"email": "alice@example.com"})
     ).json()["reset_token"]
 
     first = await client_ctx.post(
@@ -213,21 +196,15 @@ async def test_reset_password_token_is_single_use(client_ctx, debug_mode):
     assert second.status_code == 401
 
 
-async def test_reset_password_expired_token_rejected(
-    client_ctx, db_session, debug_mode
-):
+async def test_reset_password_expired_token_rejected(client_ctx, db_session, debug_mode):
     await _register_and_login(client_ctx, "alice@example.com")
     raw_token = (
-        await client_ctx.post(
-            "/api/v1/auth/forgot-password", json={"email": "alice@example.com"}
-        )
+        await client_ctx.post("/api/v1/auth/forgot-password", json={"email": "alice@example.com"})
     ).json()["reset_token"]
 
     token_row = (
         await db_session.execute(
-            select(PasswordResetToken).where(
-                PasswordResetToken.token_hash == hash_reset_token(raw_token)
-            )
+            select(PasswordResetToken).where(PasswordResetToken.token_hash == hash_reset_token(raw_token))
         )
     ).scalar_one()
     token_row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
@@ -286,9 +263,7 @@ async def test_create_update_delete_custom_role(client_ctx, db_session):
     assert update.status_code == 200
     assert update.json()["description"] == "Updated"
 
-    delete = await client_ctx.delete(
-        f"/api/v1/roles/{role_id}", headers=_auth(admin_token)
-    )
+    delete = await client_ctx.delete(f"/api/v1/roles/{role_id}", headers=_auth(admin_token))
     assert delete.status_code == 204
 
 
@@ -304,9 +279,7 @@ async def test_system_role_cannot_be_modified_or_deleted(client_ctx, db_session)
     )
     assert forbidden_update.status_code == 403
 
-    forbidden_delete = await client_ctx.delete(
-        f"/api/v1/roles/{roles['admin']}", headers=_auth(admin_token)
-    )
+    forbidden_delete = await client_ctx.delete(f"/api/v1/roles/{roles['admin']}", headers=_auth(admin_token))
     assert forbidden_delete.status_code == 403
 
 
@@ -316,9 +289,7 @@ async def test_assign_and_revoke_role(client_ctx, db_session):
     roles = await _seed_roles(client_ctx, admin_token)
 
     bob_token = await _register_and_login(client_ctx, "bob@example.com")
-    bob_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))
-    ).json()["id"]
+    bob_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))).json()["id"]
 
     assign = await client_ctx.post(
         f"/api/v1/roles/{roles['member']}/assignments",
@@ -327,9 +298,7 @@ async def test_assign_and_revoke_role(client_ctx, db_session):
     )
     assert assign.status_code == 201
 
-    listing = await client_ctx.get(
-        f"/api/v1/roles/assignments/{bob_id}", headers=_auth(admin_token)
-    )
+    listing = await client_ctx.get(f"/api/v1/roles/assignments/{bob_id}", headers=_auth(admin_token))
     assert listing.status_code == 200
     assert {r["role_code"] for r in listing.json()} == {"member"}
 
@@ -363,12 +332,8 @@ async def test_require_global_role_fast_path_guard(client_ctx, db_session):
     roles = await _seed_roles(client_ctx, admin_token)
 
     bob_token = await _register_and_login(client_ctx, "bob@example.com")
-    bob_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))
-    ).json()["id"]
-    bob = (
-        await db_session.execute(select(User).where(User.id == uuid.UUID(bob_id)))
-    ).scalar_one()
+    bob_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))).json()["id"]
+    bob = (await db_session.execute(select(User).where(User.id == uuid.UUID(bob_id)))).scalar_one()
 
     checker = require_global_role("member")
 
@@ -396,9 +361,7 @@ async def _create_policy(client: AsyncClient, admin_token: str, **kwargs) -> dic
         "conditions": None,
         **kwargs,
     }
-    response = await client.post(
-        "/api/v1/policies", json=body, headers=_auth(admin_token)
-    )
+    response = await client.post("/api/v1/policies", json=body, headers=_auth(admin_token))
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -415,9 +378,7 @@ async def test_pdp_default_deny_when_no_policy_matches(client_ctx):
     assert response.json()["matched_policies"] == []
 
 
-async def test_pdp_allows_when_unconditional_allow_policy_matches(
-    client_ctx, db_session
-):
+async def test_pdp_allows_when_unconditional_allow_policy_matches(client_ctx, db_session):
     admin_token = await _register_and_login(client_ctx, "admin@example.com")
     await _make_superuser(db_session, "admin@example.com")
     await _create_policy(
@@ -490,16 +451,12 @@ async def test_pdp_wildcard_deny_blocks_everything(client_ctx, db_session):
     assert response.json()["decision"] == "deny"
 
 
-async def test_pdp_condition_matches_subject_department_against_resource(
-    client_ctx, db_session
-):
+async def test_pdp_condition_matches_subject_department_against_resource(client_ctx, db_session):
     admin_token = await _register_and_login(client_ctx, "admin@example.com")
     await _make_superuser(db_session, "admin@example.com")
 
     alice_token = await _register_and_login(client_ctx, "alice@example.com")
-    alice_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(alice_token))
-    ).json()["id"]
+    alice_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(alice_token))).json()["id"]
     await client_ctx.patch(
         f"/api/v1/users/{alice_id}/attributes",
         json={"attributes": {"department": "Engineering"}},
@@ -543,9 +500,7 @@ async def test_pdp_condition_matches_subject_department_against_resource(
     assert non_matching.json()["decision"] == "deny"
 
 
-async def test_pdp_context_bound_corporate_ip_condition(
-    client_ctx, db_session, corporate_network
-):
+async def test_pdp_context_bound_corporate_ip_condition(client_ctx, db_session, corporate_network):
     admin_token = await _register_and_login(client_ctx, "admin@example.com")
     await _make_superuser(db_session, "admin@example.com")
     await _create_policy(
@@ -594,9 +549,7 @@ async def test_policy_evaluation_trace_persisted_accurately(client_ctx, db_sessi
     )
 
     alice_token = await _register_and_login(client_ctx, "alice@example.com")
-    alice_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(alice_token))
-    ).json()["id"]
+    alice_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(alice_token))).json()["id"]
 
     response = await client_ctx.post(
         "/api/v1/policies/evaluate",
@@ -607,9 +560,7 @@ async def test_policy_evaluation_trace_persisted_accurately(client_ctx, db_sessi
 
     log_row = (
         await db_session.execute(
-            select(PolicyEvaluationLog).where(
-                PolicyEvaluationLog.id == uuid.UUID(log_id)
-            )
+            select(PolicyEvaluationLog).where(PolicyEvaluationLog.id == uuid.UUID(log_id))
         )
     ).scalar_one()
     assert str(log_row.user_id) == alice_id

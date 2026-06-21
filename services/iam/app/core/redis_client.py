@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import logging
 
-from redis.asyncio import Redis
-
 from app.core.config import Settings
+from redis.asyncio import Redis
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +21,7 @@ def try_build_redis_client(settings: Settings) -> Redis | None:
         return Redis.from_url(settings.redis_url)
     except Exception:
         logger.warning(
-            "Failed to construct Redis client from REDIS_URL; falling back to the "
-            "in-memory backend",
+            "Failed to construct Redis client from REDIS_URL; falling back to the in-memory backend",
             exc_info=True,
         )
         return None

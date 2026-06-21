@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, status
-
-from app.api.v1.dependencies import get_current_user, get_organization_service
+from app.api.v1.dependencies import (
+    get_current_user,
+    get_organization_service,
+    require_superuser,
+)
 from app.api.v1.schemas.organization import (
     AcceptInvitationRequest,
     AddMemberRequest,
@@ -20,6 +22,7 @@ from app.api.v1.schemas.organization import (
 )
 from app.infrastructure.db.models.user import User
 from app.services.organization_service import OrganizationService
+from fastapi import APIRouter, Depends, status
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
 
@@ -36,9 +39,13 @@ async def _ensure_owner_or_superuser(
 @router.post("", response_model=OrganizationOut, status_code=status.HTTP_201_CREATED)
 async def create_organization(
     payload: OrganizationCreateRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_superuser),
     org_service: OrganizationService = Depends(get_organization_service),
 ) -> OrganizationOut:
+    """Superuser-only — tenant/organization creation is platform-provisioned,
+    not self-service. See also POST /api/v1/tenants for the richer
+    enterprise-onboarding contract (settings/metadata, owner-email bootstrap)
+    over the same underlying creation path."""
     org = await org_service.create(
         name=payload.name,
         slug=payload.slug,
@@ -110,9 +117,7 @@ async def list_organization_members(
     if not current_user.is_superuser:
         await org_service.require_membership(organization_id, current_user.id)
     return [
-        OrganizationMemberOut(
-            user_id=m.user_id, role_code=m.role.code, is_active=m.is_active
-        )
+        OrganizationMemberOut(user_id=m.user_id, role_code=m.role.code, is_active=m.is_active)
         for m in members
     ]
 
@@ -142,9 +147,7 @@ async def add_organization_member(
     )
 
 
-@router.delete(
-    "/{organization_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.delete("/{organization_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_organization_member(
     organization_id: uuid.UUID,
     user_id: uuid.UUID,
@@ -158,9 +161,7 @@ async def remove_organization_member(
     await org_service.remove_member(organization_id, user_id)
 
 
-@router.patch(
-    "/{organization_id}/members/{user_id}", response_model=OrganizationMemberOut
-)
+@router.patch("/{organization_id}/members/{user_id}", response_model=OrganizationMemberOut)
 async def update_organization_member_role(
     organization_id: uuid.UUID,
     user_id: uuid.UUID,

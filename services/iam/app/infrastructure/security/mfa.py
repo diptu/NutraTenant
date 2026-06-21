@@ -13,10 +13,9 @@ import hashlib
 import secrets
 
 import pyotp
-from cryptography.fernet import Fernet, InvalidToken
-
 from app.core.config import Settings
 from app.domain.exceptions import InvalidTokenError
+from cryptography.fernet import Fernet, InvalidToken
 
 _ISSUER = "NutraTenant"
 # Excludes 0/O/1/I — ambiguous when a user transcribes a recovery code by hand.
@@ -29,9 +28,7 @@ def generate_totp_secret() -> str:
 
 
 def build_otpauth_uri(*, secret: str, account_email: str) -> str:
-    return pyotp.totp.TOTP(secret).provisioning_uri(
-        name=account_email, issuer_name=_ISSUER
-    )
+    return pyotp.totp.TOTP(secret).provisioning_uri(name=account_email, issuer_name=_ISSUER)
 
 
 def verify_totp_code(secret: str, code: str) -> bool:
@@ -45,11 +42,7 @@ def encrypt_secret(settings: Settings, secret: str) -> str:
 
 def decrypt_secret(settings: Settings, encrypted_secret: str) -> str:
     try:
-        return (
-            Fernet(settings.mfa_secret_encryption_key)
-            .decrypt(encrypted_secret.encode())
-            .decode()
-        )
+        return Fernet(settings.mfa_secret_encryption_key).decrypt(encrypted_secret.encode()).decode()
     except InvalidToken as exc:
         raise InvalidTokenError("MFA secret could not be decrypted") from exc
 
@@ -59,10 +52,7 @@ def generate_recovery_codes(count: int) -> list[str]:
     (see ``hash_recovery_code``); the raw values are shown to the user once."""
     codes = []
     for _ in range(count):
-        raw = "".join(
-            secrets.choice(_RECOVERY_CODE_ALPHABET)
-            for _ in range(_RECOVERY_CODE_LENGTH)
-        )
+        raw = "".join(secrets.choice(_RECOVERY_CODE_ALPHABET) for _ in range(_RECOVERY_CODE_LENGTH))
         half = _RECOVERY_CODE_LENGTH // 2
         codes.append(f"{raw[:half]}-{raw[half:]}")
     return codes

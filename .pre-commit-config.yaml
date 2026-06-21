@@ -1,0 +1,38 @@
+repos:
+  # Generic hygiene checks — cheap, fast, catch accidental commits.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+
+  # Ruff: lint (pyflakes + pycodestyle + isort, via select in ruff.toml) and
+  # format (Black-compatible) in one tool/one config — no Black/Flake8/isort
+  # line-length drift to keep in sync. --config pins every service to the
+  # same root ruff.toml regardless of which service's pyproject.toml ruff
+  # would otherwise discover first walking up from a given file.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.18
+    hooks:
+      - id: ruff
+        name: ruff (lint, autofix)
+        args: [--config=ruff.toml, --fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+        name: ruff (format)
+        args: [--config=ruff.toml]
+
+exclude: |
+  (?x)^(
+    .*/\.venv/.*|
+    .*/alembic/versions/.*|
+    .*/__pycache__/.*|
+    .*\.lock|
+    .*/node_modules/.*
+  )$

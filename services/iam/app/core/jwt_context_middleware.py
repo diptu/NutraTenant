@@ -19,12 +19,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import jwt
+from app.core.config import get_settings
+from app.domain.exceptions import ForbiddenError, InvalidTokenError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-
-from app.core.config import get_settings
-from app.domain.exceptions import ForbiddenError, InvalidTokenError
 
 
 def _decode_claims(request: Request) -> dict[str, Any] | None:
@@ -35,9 +34,7 @@ def _decode_claims(request: Request) -> dict[str, Any] | None:
 
     settings = get_settings()
     try:
-        claims = jwt.decode(
-            token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm]
-        )
+        claims = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
     except jwt.PyJWTError:
         return None
 

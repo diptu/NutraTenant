@@ -12,8 +12,6 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy.exc import IntegrityError
-
 from app.domain.exceptions import (
     AlreadyExistsError,
     ForbiddenError,
@@ -33,6 +31,7 @@ from app.infrastructure.db.repositories.permission_repo import PermissionReposit
 from app.infrastructure.db.repositories.role_repo import RoleRepository
 from app.infrastructure.db.repositories.user_repo import UserRepository
 from app.infrastructure.db.repositories.user_role_repo import UserRoleRepository
+from sqlalchemy.exc import IntegrityError
 
 DEFAULT_GLOBAL_ROLES = (
     ("admin", "Admin", "Platform-wide administrator"),
@@ -126,9 +125,7 @@ class RoleService:
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            raise RoleAlreadyExistsError(
-                f"A role with code '{code}' already exists"
-            ) from exc
+            raise RoleAlreadyExistsError(f"A role with code '{code}' already exists") from exc
 
         await self._session.commit()
         return role
@@ -167,9 +164,7 @@ class RoleService:
 
     # -- permission assignment (the role's own grants, not a user's) -------
 
-    async def add_permissions(
-        self, role_id: uuid.UUID, codes: list[str], *, assigned_by: uuid.UUID
-    ) -> Role:
+    async def add_permissions(self, role_id: uuid.UUID, codes: list[str], *, assigned_by: uuid.UUID) -> Role:
         role = await self.get_any_role(role_id)
         if role.is_system:
             raise ForbiddenError("System roles cannot be modified")
@@ -198,9 +193,7 @@ class RoleService:
         assert reloaded is not None
         return reloaded
 
-    async def remove_permission(
-        self, role_id: uuid.UUID, permission_id: uuid.UUID
-    ) -> Role:
+    async def remove_permission(self, role_id: uuid.UUID, permission_id: uuid.UUID) -> Role:
         role = await self.get_any_role(role_id)
         if role.is_system:
             raise ForbiddenError("System roles cannot be modified")
@@ -242,9 +235,7 @@ class RoleService:
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            raise AlreadyExistsError(
-                f"User already has the '{role.code}' role"
-            ) from exc
+            raise AlreadyExistsError(f"User already has the '{role.code}' role") from exc
 
         await self._audit(
             event_type="rbac.role.assigned",
@@ -277,9 +268,7 @@ class RoleService:
             return False
         return await self._user_roles.has_role(user_id, role.id)
 
-    async def _audit(
-        self, *, event_type: str, user_id: uuid.UUID, context: dict
-    ) -> None:
+    async def _audit(self, *, event_type: str, user_id: uuid.UUID, context: dict) -> None:
         self._audit_log.add(
             AuditLog(
                 id=uuid.uuid4(),

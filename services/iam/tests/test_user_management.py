@@ -20,9 +20,8 @@ import uuid
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
-
 from app.infrastructure.db.models.user import User
+from sqlalchemy import select
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,9 +38,7 @@ async def _register(client, email: str, password: str = "Password123!") -> dict:
 
 
 async def _login_token(client, email: str, password: str = "Password123!") -> str:
-    resp = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": password}
-    )
+    resp = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
 
@@ -110,9 +107,7 @@ class TestGetMe:
 
 class TestListUsers:
     @pytest.mark.anyio
-    async def test_admin_can_list_users(
-        self, client, admin_token, regular_user
-    ) -> None:
+    async def test_admin_can_list_users(self, client, admin_token, regular_user) -> None:
         resp = await client.get("/api/v1/users", headers=_auth(admin_token))
         assert resp.status_code == 200
         assert len(resp.json()) >= 2
@@ -124,9 +119,7 @@ class TestListUsers:
 
     @pytest.mark.anyio
     async def test_search_by_email(self, client, admin_token, regular_user) -> None:
-        resp = await client.get(
-            "/api/v1/users", params={"q": "regular"}, headers=_auth(admin_token)
-        )
+        resp = await client.get("/api/v1/users", params={"q": "regular"}, headers=_auth(admin_token))
         assert resp.status_code == 200
         items = resp.json()
         assert items
@@ -140,38 +133,24 @@ class TestListUsers:
 
 class TestGetUser:
     @pytest.mark.anyio
-    async def test_admin_can_get_any_user(
-        self, client, admin_token, regular_user
-    ) -> None:
-        resp = await client.get(
-            f"/api/v1/users/{regular_user['id']}", headers=_auth(admin_token)
-        )
+    async def test_admin_can_get_any_user(self, client, admin_token, regular_user) -> None:
+        resp = await client.get(f"/api/v1/users/{regular_user['id']}", headers=_auth(admin_token))
         assert resp.status_code == 200
         assert resp.json()["id"] == regular_user["id"]
 
     @pytest.mark.anyio
-    async def test_user_can_get_own_record(
-        self, client, regular_token, regular_user
-    ) -> None:
-        resp = await client.get(
-            f"/api/v1/users/{regular_user['id']}", headers=_auth(regular_token)
-        )
+    async def test_user_can_get_own_record(self, client, regular_token, regular_user) -> None:
+        resp = await client.get(f"/api/v1/users/{regular_user['id']}", headers=_auth(regular_token))
         assert resp.status_code == 200
 
     @pytest.mark.anyio
-    async def test_user_cannot_get_other_user(
-        self, client, regular_token, admin_user
-    ) -> None:
-        resp = await client.get(
-            f"/api/v1/users/{admin_user['id']}", headers=_auth(regular_token)
-        )
+    async def test_user_cannot_get_other_user(self, client, regular_token, admin_user) -> None:
+        resp = await client.get(f"/api/v1/users/{admin_user['id']}", headers=_auth(regular_token))
         assert resp.status_code == 403
 
     @pytest.mark.anyio
     async def test_returns_404_for_unknown_user(self, client, admin_token) -> None:
-        resp = await client.get(
-            f"/api/v1/users/{uuid.uuid4()}", headers=_auth(admin_token)
-        )
+        resp = await client.get(f"/api/v1/users/{uuid.uuid4()}", headers=_auth(admin_token))
         assert resp.status_code == 404
 
 
@@ -182,9 +161,7 @@ class TestGetUser:
 
 class TestUpdateUser:
     @pytest.mark.anyio
-    async def test_admin_can_update_any_users_full_name(
-        self, client, admin_token, regular_user
-    ) -> None:
+    async def test_admin_can_update_any_users_full_name(self, client, admin_token, regular_user) -> None:
         resp = await client.patch(
             f"/api/v1/users/{regular_user['id']}",
             json={"full_name": "Admin Set Name"},
@@ -194,9 +171,7 @@ class TestUpdateUser:
         assert resp.json()["full_name"] == "Admin Set Name"
 
     @pytest.mark.anyio
-    async def test_user_can_update_own_full_name(
-        self, client, regular_token, regular_user
-    ) -> None:
+    async def test_user_can_update_own_full_name(self, client, regular_token, regular_user) -> None:
         resp = await client.patch(
             f"/api/v1/users/{regular_user['id']}",
             json={"full_name": "Self Set Name"},
@@ -206,9 +181,7 @@ class TestUpdateUser:
         assert resp.json()["full_name"] == "Self Set Name"
 
     @pytest.mark.anyio
-    async def test_user_cannot_update_other_users_name(
-        self, client, regular_token, admin_user
-    ) -> None:
+    async def test_user_cannot_update_other_users_name(self, client, regular_token, admin_user) -> None:
         resp = await client.patch(
             f"/api/v1/users/{admin_user['id']}",
             json={"full_name": "Hacker"},
@@ -224,25 +197,17 @@ class TestUpdateUser:
 
 class TestActivateDeactivate:
     @pytest.mark.anyio
-    async def test_deactivate_then_activate(
-        self, client, admin_token, regular_user
-    ) -> None:
-        resp = await client.post(
-            f"/api/v1/users/{regular_user['id']}/deactivate", headers=_auth(admin_token)
-        )
+    async def test_deactivate_then_activate(self, client, admin_token, regular_user) -> None:
+        resp = await client.post(f"/api/v1/users/{regular_user['id']}/deactivate", headers=_auth(admin_token))
         assert resp.status_code == 200
         assert resp.json()["is_active"] is False
 
-        resp = await client.post(
-            f"/api/v1/users/{regular_user['id']}/activate", headers=_auth(admin_token)
-        )
+        resp = await client.post(f"/api/v1/users/{regular_user['id']}/activate", headers=_auth(admin_token))
         assert resp.status_code == 200
         assert resp.json()["is_active"] is True
 
     @pytest.mark.anyio
-    async def test_non_admin_cannot_deactivate(
-        self, client, regular_token, regular_user
-    ) -> None:
+    async def test_non_admin_cannot_deactivate(self, client, regular_token, regular_user) -> None:
         resp = await client.post(
             f"/api/v1/users/{regular_user['id']}/deactivate",
             headers=_auth(regular_token),
@@ -255,8 +220,6 @@ class TestActivateDeactivate:
     ) -> None:
         """A deactivated user's existing access token stops working immediately
         — get_current_user checks live `is_active` on every request."""
-        await client.post(
-            f"/api/v1/users/{regular_user['id']}/deactivate", headers=_auth(admin_token)
-        )
+        await client.post(f"/api/v1/users/{regular_user['id']}/deactivate", headers=_auth(admin_token))
         resp = await client.get("/api/v1/users/me", headers=_auth(regular_token))
         assert resp.status_code == 401

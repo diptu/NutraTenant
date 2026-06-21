@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-from fastapi import Depends
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.cache import PermissionCache, get_permission_cache
 from app.core.config import Settings, get_settings
 from app.core.rate_limit import RateLimiter, get_rate_limiter
@@ -18,7 +13,7 @@ from app.infrastructure.db.repositories.user_repo import UserRepository
 from app.infrastructure.db.repositories.user_role_repo import UserRoleRepository
 from app.infrastructure.db.session import get_db as get_async_db
 from app.infrastructure.security.google_oidc import GoogleOIDCClient
-from app.infrastructure.security.jwt import decode_access_token
+from app.infrastructure.security.jwt import AccessTokenClaims, decode_access_token
 from app.infrastructure.security.oauth_state_store import OAuthStateStore
 from app.infrastructure.security.token_cache import RedisTokenCache, TokenCache
 from app.services.auth_service import AuthService
@@ -29,10 +24,15 @@ from app.services.policy_service import PolicyService
 from app.services.resource_service import ResourceService
 from app.services.role_service import RoleService
 from app.services.user_service import UserService
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
     "get_async_db",
     "get_auth_service",
+    "get_current_access_claims",
     "get_current_user",
     "get_google_oauth_service",
     "get_oidc_client",
@@ -115,25 +115,41 @@ def get_google_oauth_service(
     )
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
-    session: AsyncSession = Depends(get_async_db),
-    settings: Settings = Depends(get_settings),
-    blacklist: TokenBlacklist = Depends(get_token_blacklist),
-) -> User:
+async def _validate_access_claims(
+    credentials: HTTPAuthorizationCredentials,
+    settings: Settings,
+    blacklist: TokenBlacklist,
+) -> AccessTokenClaims:
     claims = decode_access_token(settings, credentials.credentials)
 
     if await blacklist.contains_jti(str(claims.jti)):
         raise InvalidTokenError("Access token has been revoked")
 
     invalidate_before = await blacklist.get_invalidate_before(str(claims.subject_id))
-    if (
-        invalidate_before is not None
-        and claims.issued_at.timestamp() < invalidate_before
-    ):
-        raise InvalidTokenError(
-            "Access token was issued before the account's last credential change"
-        )
+    if invalidate_before is not None and claims.issued_at.timestamp() < invalidate_before:
+        raise InvalidTokenError("Access token was issued before the account's last credential change")
+    return claims
+
+
+async def get_current_access_claims(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+    settings: Settings = Depends(get_settings),
+    blacklist: TokenBlacklist = Depends(get_token_blacklist),
+) -> AccessTokenClaims:
+    """For routes that need the *session's* tenant_id/role claims, not just
+    the caller's identity — e.g. verifying a request is scoped to the tenant
+    its access token was minted for, independent of whether the user also
+    happens to be a member of other tenants."""
+    return await _validate_access_claims(credentials, settings, blacklist)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+    session: AsyncSession = Depends(get_async_db),
+    settings: Settings = Depends(get_settings),
+    blacklist: TokenBlacklist = Depends(get_token_blacklist),
+) -> User:
+    claims = await _validate_access_claims(credentials, settings, blacklist)
 
     user = await UserRepository(session).get_by_id(claims.subject_id)
     if user is None or not user.is_active:
@@ -159,9 +175,7 @@ def require_global_role(code: str):
             return current_user
 
         role = await RoleRepository(session).get_by_code(code)
-        if role is None or not await UserRoleRepository(session).has_role(
-            current_user.id, role.id
-        ):
+        if role is None or not await UserRoleRepository(session).has_role(current_user.id, role.id):
             raise ForbiddenError(f"This action requires the '{code}' role")
         return current_user
 

@@ -27,16 +27,15 @@ import httpx
 import jwt
 import pytest
 import respx
-from cryptography.hazmat.primitives.asymmetric import rsa
-from httpx import ASGITransport, AsyncClient
-from jwt.algorithms import RSAAlgorithm
-from sqlalchemy import select
-
 from app.api.v1.dependencies import get_token_cache
 from app.core.config import get_settings
 from app.infrastructure.db.models.user import User
 from app.infrastructure.security.google_oidc import JWKS_URI, TOKEN_ENDPOINT
 from app.infrastructure.security.token_cache import InMemoryTokenCache
+from cryptography.hazmat.primitives.asymmetric import rsa
+from httpx import ASGITransport, AsyncClient
+from jwt.algorithms import RSAAlgorithm
+from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
 
@@ -75,9 +74,7 @@ def google_jwks(google_keypair):
     return {"keys": [jwk]}
 
 
-def _sign_id_token(
-    private_key, *, sub: str, email: str, nonce: str, email_verified: bool = True
-):
+def _sign_id_token(private_key, *, sub: str, email: str, nonce: str, email_verified: bool = True):
     settings = get_settings()
     now = int(time.time())
     claims = {
@@ -132,29 +129,17 @@ async def test_callback_conflict_returns_409_for_different_sub_same_email(
 
     state, nonce = await _start_google_login(client_ctx)
     _mock_jwks(respx, google_jwks)
-    _mock_token_endpoint(
-        respx, _sign_id_token(private_key, sub="sub_A", email=email, nonce=nonce)
-    )
-    first = await client_ctx.get(
-        "/api/v1/auth/google/callback", params={"code": "c1", "state": state}
-    )
+    _mock_token_endpoint(respx, _sign_id_token(private_key, sub="sub_A", email=email, nonce=nonce))
+    first = await client_ctx.get("/api/v1/auth/google/callback", params={"code": "c1", "state": state})
     assert first.status_code == 200
 
     state2, nonce2 = await _start_google_login(client_ctx)
-    _mock_token_endpoint(
-        respx, _sign_id_token(private_key, sub="sub_B", email=email, nonce=nonce2)
-    )
-    second = await client_ctx.get(
-        "/api/v1/auth/google/callback", params={"code": "c2", "state": state2}
-    )
+    _mock_token_endpoint(respx, _sign_id_token(private_key, sub="sub_B", email=email, nonce=nonce2))
+    second = await client_ctx.get("/api/v1/auth/google/callback", params={"code": "c2", "state": state2})
     assert second.status_code == 409
 
-    user = (
-        await db_session.execute(select(User).where(User.email == email))
-    ).scalar_one()
-    assert (
-        user.google_subject == "sub_A"
-    )  # the conflicting second sub never overwrote it
+    user = (await db_session.execute(select(User).where(User.email == email))).scalar_one()
+    assert user.google_subject == "sub_A"  # the conflicting second sub never overwrote it
 
 
 # ---------------------------------------------------------------------------
@@ -173,15 +158,11 @@ class TestGoogleCallbackErrorParams:
 
     async def test_missing_code_returns_400(self, client_ctx):
         state, _nonce = await _start_google_login(client_ctx)
-        response = await client_ctx.get(
-            "/api/v1/auth/google/callback", params={"state": state}
-        )
+        response = await client_ctx.get("/api/v1/auth/google/callback", params={"state": state})
         assert response.status_code == 400
 
     async def test_missing_state_returns_400(self, client_ctx):
-        response = await client_ctx.get(
-            "/api/v1/auth/google/callback", params={"code": "c"}
-        )
+        response = await client_ctx.get("/api/v1/auth/google/callback", params={"code": "c"})
         assert response.status_code == 400
 
     async def test_unknown_state_returns_401(self, client_ctx):
@@ -202,9 +183,7 @@ class TestGoogleCallbackErrorParams:
 
 class TestGoogleLoginRedirect:
     async def test_redirect_variant_returns_302_to_google(self, client_ctx):
-        response = await client_ctx.get(
-            "/api/v1/auth/google/login/redirect", follow_redirects=False
-        )
+        response = await client_ctx.get("/api/v1/auth/google/login/redirect", follow_redirects=False)
         assert response.status_code == 302
         assert "accounts.google.com" in response.headers["location"]
 
@@ -216,13 +195,9 @@ class TestGoogleLoginRedirect:
 
 class TestJwksCache:
     @respx.mock
-    async def test_warm_cache_skips_second_fetch(
-        self, client_ctx, google_keypair, google_jwks
-    ):
+    async def test_warm_cache_skips_second_fetch(self, client_ctx, google_keypair, google_jwks):
         private_key, _ = google_keypair
-        jwks_route = respx.get(JWKS_URI).mock(
-            return_value=httpx.Response(200, json=google_jwks)
-        )
+        jwks_route = respx.get(JWKS_URI).mock(return_value=httpx.Response(200, json=google_jwks))
 
         for i in range(2):
             state, nonce = await _start_google_login(client_ctx)

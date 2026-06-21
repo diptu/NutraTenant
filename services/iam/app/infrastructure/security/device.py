@@ -33,9 +33,7 @@ def describe_device(user_agent: str | None) -> str:
         (name for name, pattern in _BROWSER_PATTERNS if pattern.search(user_agent)),
         None,
     )
-    os_name = next(
-        (name for name, pattern in _OS_PATTERNS if pattern.search(user_agent)), None
-    )
+    os_name = next((name for name, pattern in _OS_PATTERNS if pattern.search(user_agent)), None)
 
     if browser and os_name:
         return f"{browser} on {os_name}"

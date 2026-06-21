@@ -49,9 +49,7 @@ async def access_token(client, registered_user: str) -> str:
 @pytest.fixture
 async def enrolled_mfa(client, registered_user, access_token):
     """Completes setup + confirm; returns (secret, recovery_codes)."""
-    setup_resp = await client.post(
-        "/api/v1/auth/mfa/setup", headers=_auth(access_token)
-    )
+    setup_resp = await client.post("/api/v1/auth/mfa/setup", headers=_auth(access_token))
     assert setup_resp.status_code == 200, setup_resp.text
     secret = setup_resp.json()["secret"]
 
@@ -72,9 +70,7 @@ async def enrolled_mfa(client, registered_user, access_token):
 
 class TestMfaSetup:
     @pytest.mark.anyio
-    async def test_setup_returns_secret_and_otpauth_uri(
-        self, client, access_token, registered_user
-    ) -> None:
+    async def test_setup_returns_secret_and_otpauth_uri(self, client, access_token, registered_user) -> None:
         resp = await client.post("/api/v1/auth/mfa/setup", headers=_auth(access_token))
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -88,13 +84,9 @@ class TestMfaSetup:
         assert resp.status_code == 401
 
     @pytest.mark.anyio
-    async def test_setup_again_before_confirm_replaces_secret(
-        self, client, access_token
-    ) -> None:
+    async def test_setup_again_before_confirm_replaces_secret(self, client, access_token) -> None:
         first = await client.post("/api/v1/auth/mfa/setup", headers=_auth(access_token))
-        second = await client.post(
-            "/api/v1/auth/mfa/setup", headers=_auth(access_token)
-        )
+        second = await client.post("/api/v1/auth/mfa/setup", headers=_auth(access_token))
         assert first.json()["secret"] != second.json()["secret"]
 
         # Confirming with a code from the now-stale first secret fails.
@@ -106,9 +98,7 @@ class TestMfaSetup:
         assert resp.status_code == 401
 
     @pytest.mark.anyio
-    async def test_setup_when_already_enabled_returns_409(
-        self, client, access_token, enrolled_mfa
-    ) -> None:
+    async def test_setup_when_already_enabled_returns_409(self, client, access_token, enrolled_mfa) -> None:
         resp = await client.post("/api/v1/auth/mfa/setup", headers=_auth(access_token))
         assert resp.status_code == 409
 
@@ -123,9 +113,7 @@ class TestMfaConfirm:
     async def test_confirm_with_valid_code_enables_mfa_and_returns_recovery_codes(
         self, client, access_token
     ) -> None:
-        setup_resp = await client.post(
-            "/api/v1/auth/mfa/setup", headers=_auth(access_token)
-        )
+        setup_resp = await client.post("/api/v1/auth/mfa/setup", headers=_auth(access_token))
         secret = setup_resp.json()["secret"]
 
         resp = await client.post(
@@ -139,9 +127,7 @@ class TestMfaConfirm:
         assert len(set(codes)) == 8
 
     @pytest.mark.anyio
-    async def test_confirm_with_wrong_code_returns_401(
-        self, client, access_token
-    ) -> None:
+    async def test_confirm_with_wrong_code_returns_401(self, client, access_token) -> None:
         await client.post("/api/v1/auth/mfa/setup", headers=_auth(access_token))
         resp = await client.post(
             "/api/v1/auth/mfa/confirm",
@@ -151,9 +137,7 @@ class TestMfaConfirm:
         assert resp.status_code == 401
 
     @pytest.mark.anyio
-    async def test_confirm_without_setup_returns_400(
-        self, client, access_token
-    ) -> None:
+    async def test_confirm_without_setup_returns_400(self, client, access_token) -> None:
         resp = await client.post(
             "/api/v1/auth/mfa/confirm",
             json={"code": "123456"},
@@ -162,9 +146,7 @@ class TestMfaConfirm:
         assert resp.status_code == 400
 
     @pytest.mark.anyio
-    async def test_confirm_when_already_enabled_returns_409(
-        self, client, access_token, enrolled_mfa
-    ) -> None:
+    async def test_confirm_when_already_enabled_returns_409(self, client, access_token, enrolled_mfa) -> None:
         secret, _ = enrolled_mfa
         resp = await client.post(
             "/api/v1/auth/mfa/confirm",
@@ -181,9 +163,7 @@ class TestMfaConfirm:
 
 class TestMfaLoginFlow:
     @pytest.mark.anyio
-    async def test_login_without_mfa_returns_tokens_directly(
-        self, client, registered_user
-    ) -> None:
+    async def test_login_without_mfa_returns_tokens_directly(self, client, registered_user) -> None:
         resp = await client.post(
             "/api/v1/auth/login",
             json={"email": registered_user, "password": _DEFAULT_PASSWORD},
@@ -281,9 +261,7 @@ class TestMfaLoginFlow:
         assert resp.status_code == 401
 
     @pytest.mark.anyio
-    async def test_login_verify_with_garbage_challenge_token_returns_401(
-        self, client
-    ) -> None:
+    async def test_login_verify_with_garbage_challenge_token_returns_401(self, client) -> None:
         resp = await client.post(
             "/api/v1/auth/mfa/login-verify",
             json={"mfa_challenge_token": "not-a-real-token", "code": "123456"},
@@ -393,9 +371,7 @@ class TestMfaDisable:
         assert login_resp.json()["access_token"] is not None
 
     @pytest.mark.anyio
-    async def test_disable_with_recovery_code_also_works(
-        self, client, access_token, enrolled_mfa
-    ) -> None:
+    async def test_disable_with_recovery_code_also_works(self, client, access_token, enrolled_mfa) -> None:
         _, recovery_codes = enrolled_mfa
         resp = await client.post(
             "/api/v1/auth/mfa/disable",
@@ -405,9 +381,7 @@ class TestMfaDisable:
         assert resp.status_code == 204, resp.text
 
     @pytest.mark.anyio
-    async def test_disable_with_wrong_password_returns_401(
-        self, client, access_token, enrolled_mfa
-    ) -> None:
+    async def test_disable_with_wrong_password_returns_401(self, client, access_token, enrolled_mfa) -> None:
         secret, _ = enrolled_mfa
         resp = await client.post(
             "/api/v1/auth/mfa/disable",
@@ -420,9 +394,7 @@ class TestMfaDisable:
         assert resp.status_code == 401
 
     @pytest.mark.anyio
-    async def test_disable_with_wrong_code_returns_401(
-        self, client, access_token, enrolled_mfa
-    ) -> None:
+    async def test_disable_with_wrong_code_returns_401(self, client, access_token, enrolled_mfa) -> None:
         resp = await client.post(
             "/api/v1/auth/mfa/disable",
             json={"current_password": _DEFAULT_PASSWORD, "code": "000000"},
@@ -431,9 +403,7 @@ class TestMfaDisable:
         assert resp.status_code == 401
 
     @pytest.mark.anyio
-    async def test_disable_when_not_enabled_returns_400(
-        self, client, access_token
-    ) -> None:
+    async def test_disable_when_not_enabled_returns_400(self, client, access_token) -> None:
         resp = await client.post(
             "/api/v1/auth/mfa/disable",
             json={"current_password": _DEFAULT_PASSWORD, "code": "123456"},

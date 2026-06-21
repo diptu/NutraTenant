@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+from app.core.config import get_settings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-
-from app.core.config import get_settings
 
 _BASE_HEADERS = {
     "X-Content-Type-Options": "nosniff",

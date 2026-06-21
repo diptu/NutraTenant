@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import or_, select
-
 from app.infrastructure.db.models.resource import Resource
 from app.infrastructure.db.repositories.base_repository import BaseRepository
+from sqlalchemy import or_, select
 
 
 class ResourceRepository(BaseRepository[Resource]):

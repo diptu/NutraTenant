@@ -80,9 +80,7 @@ class RateLimitExceededError(DomainError):
 
     def __init__(self, retry_after_seconds: int) -> None:
         self.retry_after_seconds = retry_after_seconds
-        super().__init__(
-            f"Rate limit exceeded. Retry after {retry_after_seconds} seconds."
-        )
+        super().__init__(f"Rate limit exceeded. Retry after {retry_after_seconds} seconds.")
 
 
 class TenantSelectionRequiredError(DomainError):
@@ -92,9 +90,7 @@ class TenantSelectionRequiredError(DomainError):
 
     def __init__(self, organizations: list[dict]) -> None:
         self.organizations = organizations
-        super().__init__(
-            "Multiple tenants available for this account; specify tenant_id to continue"
-        )
+        super().__init__("Multiple tenants available for this account; specify tenant_id to continue")
 
 
 class UserNotFoundError(DomainError):

@@ -4,16 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request, Response, status
-from fastapi.responses import RedirectResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
 from app.api.v1.dependencies import (
     get_auth_service,
     get_current_user,
     get_google_oauth_service,
 )
 from app.api.v1.schemas.auth import (
+    AcceptInviteRequest,
+    AcceptInviteResponse,
     ChangePasswordRequest,
     ForgotPasswordRequest,
     ForgotPasswordResponse,
@@ -31,6 +29,8 @@ from app.api.v1.schemas.auth import (
     ResetPasswordRequest,
     RoleOut,
     SessionOut,
+    SwitchTenantRequest,
+    SwitchTenantResponse,
     TenantOut,
     TokenResponse,
     UserOut,
@@ -41,6 +41,9 @@ from app.infrastructure.db.models.user import User
 from app.infrastructure.security.device import describe_device
 from app.services.auth_service import AuthService, LoginResult
 from app.services.google_oauth_service import GoogleOAuthService
+from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -49,9 +52,7 @@ _REFRESH_COOKIE_PATH = "/api/v1/auth"
 _optional_bearer = HTTPBearer(auto_error=False)
 
 
-def _set_refresh_cookie(
-    response: Response, refresh_token: str, settings: Settings
-) -> None:
+def _set_refresh_cookie(response: Response, refresh_token: str, settings: Settings) -> None:
     response.set_cookie(
         key=_REFRESH_COOKIE_NAME,
         value=refresh_token,
@@ -80,7 +81,11 @@ def _account_status(user: User) -> str:
 
 
 def _build_token_response(
-    result: LoginResult, *, ip_address: str | None, user_agent: str | None, settings: Settings
+    result: LoginResult,
+    *,
+    ip_address: str | None,
+    user_agent: str | None,
+    settings: Settings,
 ) -> TokenResponse:
     """Shared by /login and /mfa/login-verify — both produce a LoginResult,
     either an MFA challenge or a completed session, and both render to the
@@ -107,9 +112,7 @@ def _build_token_response(
         if result.organization
         else None
     )
-    role = (
-        RoleOut(id=str(result.role.id), name=result.role.name) if result.role else None
-    )
+    role = RoleOut(id=str(result.role.id), name=result.role.name) if result.role else None
 
     return TokenResponse(
         access_token=result.access_token,
@@ -159,6 +162,32 @@ async def register(
     return UserOut.model_validate(user)
 
 
+@router.post(
+    "/accept-invite",
+    response_model=AcceptInviteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def accept_invite(
+    payload: AcceptInviteRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> AcceptInviteResponse:
+    """Self-service signup via a tenant invitation — no prior account or
+    authentication required. An email that already has an account must
+    accept via the authenticated POST /organizations/invitations/accept
+    instead (see AuthService.accept_invite for why)."""
+    user, organization, role = await auth_service.accept_invite(
+        invite_token=payload.invite_token,
+        name=payload.name,
+        password=payload.password,
+    )
+    return AcceptInviteResponse(
+        user_id=user.id,
+        tenant_id=organization.slug,
+        role=role.name,
+        status="ACTIVE",
+    )
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
     payload: LoginRequest,
@@ -179,9 +208,7 @@ async def login(
     if not result.mfa_required:
         assert result.refresh_token is not None
         _set_refresh_cookie(response, result.refresh_token, settings)
-    return _build_token_response(
-        result, ip_address=ip_address, user_agent=user_agent, settings=settings
-    )
+    return _build_token_response(result, ip_address=ip_address, user_agent=user_agent, settings=settings)
 
 
 @router.post("/mfa/login-verify", response_model=TokenResponse)
@@ -204,9 +231,7 @@ async def mfa_login_verify(
     )
     assert result.refresh_token is not None
     _set_refresh_cookie(response, result.refresh_token, settings)
-    return _build_token_response(
-        result, ip_address=ip_address, user_agent=user_agent, settings=settings
-    )
+    return _build_token_response(result, ip_address=ip_address, user_agent=user_agent, settings=settings)
 
 
 @router.post("/mfa/setup", response_model=MfaSetupResponse)
@@ -226,9 +251,7 @@ async def confirm_mfa(
     current_user: User = Depends(get_current_user),
     auth_service: AuthService = Depends(get_auth_service),
 ) -> MfaConfirmResponse:
-    recovery_codes = await auth_service.confirm_mfa(
-        user_id=current_user.id, code=payload.code
-    )
+    recovery_codes = await auth_service.confirm_mfa(user_id=current_user.id, code=payload.code)
     return MfaConfirmResponse(recovery_codes=recovery_codes)
 
 
@@ -256,9 +279,7 @@ async def refresh(
     # Cookie is the primary transport (browser clients); the body field is
     # the fallback for clients that received the refresh token in the
     # /login JSON response instead and have no cookie jar — see RefreshRequest.
-    refresh_token = request.cookies.get(_REFRESH_COOKIE_NAME) or (
-        payload.refresh_token if payload else None
-    )
+    refresh_token = request.cookies.get(_REFRESH_COOKIE_NAME) or (payload.refresh_token if payload else None)
     if not refresh_token:
         raise InvalidTokenError("Missing refresh token")
 
@@ -272,6 +293,35 @@ async def refresh(
         access_token=token_pair.access_token,
         refresh_token=token_pair.refresh_token,
         expires_in=settings.access_token_expire_minutes * 60,
+    )
+
+
+@router.post("/switch-tenant", response_model=SwitchTenantResponse)
+async def switch_tenant(
+    payload: SwitchTenantRequest,
+    request: Request,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    auth_service: AuthService = Depends(get_auth_service),
+    settings: Settings = Depends(get_settings),
+) -> SwitchTenantResponse:
+    """Re-mints the caller's access token under a different tenant they
+    already have an active membership in — requires being logged in, but
+    not re-authenticating."""
+    refresh_token = request.cookies.get(_REFRESH_COOKIE_NAME)
+    result = await auth_service.switch_tenant(
+        user=current_user,
+        tenant_slug=payload.tenant_id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        current_refresh_token=refresh_token,
+    )
+    if result.refresh_token is not None:
+        _set_refresh_cookie(response, result.refresh_token, settings)
+    return SwitchTenantResponse(
+        access_token=result.access_token,
+        tenant_id=result.organization.slug,
+        role=result.role.name,
     )
 
 
@@ -317,9 +367,7 @@ async def reset_password(
     payload: ResetPasswordRequest,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> None:
-    await auth_service.reset_password(
-        raw_token=payload.token, new_password=payload.new_password
-    )
+    await auth_service.reset_password(raw_token=payload.token, new_password=payload.new_password)
 
 
 @router.get("/google/login", response_model=GoogleAuthorizeResponse)

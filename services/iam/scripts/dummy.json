@@ -1,0 +1,339 @@
+{
+  "tenant": {
+    "id": "tenant_apple_001",
+    "name": "Apple Corp",
+    "slug": "apple-corp",
+    "status": "active",
+    "subscription_plan": "enterprise",
+    "created_at": "2026-01-01T00:00:00Z",
+    "owner_id": "usr_apple_owner_001"
+  },
+  "users": [
+    {
+      "id": "usr_apple_owner_001",
+      "email": "john.ceo@apple-corp.com",
+      "first_name": "John",
+      "last_name": "Smith",
+      "department": "Executive",
+      "job_title": "CEO",
+      "role": "owner",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 5,
+      "employment_type": "full_time",
+      "location": "USA"
+    },
+    {
+      "id": "usr_apple_admin_001",
+      "email": "sarah.admin@apple-corp.com",
+      "first_name": "Sarah",
+      "last_name": "Johnson",
+      "department": "IT",
+      "job_title": "IT Director",
+      "role": "admin",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 4,
+      "employment_type": "full_time",
+      "location": "USA"
+    },
+    {
+      "id": "usr_apple_admin_002",
+      "email": "michael.admin@apple-corp.com",
+      "first_name": "Michael",
+      "last_name": "Brown",
+      "department": "Operations",
+      "job_title": "Operations Manager",
+      "role": "admin",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 4,
+      "employment_type": "full_time",
+      "location": "USA"
+    },
+    {
+      "id": "usr_apple_mod_001",
+      "email": "emma.mod@apple-corp.com",
+      "first_name": "Emma",
+      "last_name": "Wilson",
+      "department": "HR",
+      "job_title": "HR Manager",
+      "role": "moderator",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 3,
+      "employment_type": "full_time",
+      "location": "USA"
+    },
+    {
+      "id": "usr_apple_mod_002",
+      "email": "david.mod@apple-corp.com",
+      "first_name": "David",
+      "last_name": "Taylor",
+      "department": "Finance",
+      "job_title": "Finance Lead",
+      "role": "moderator",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 3,
+      "employment_type": "full_time",
+      "location": "USA"
+    },
+    {
+      "id": "usr_apple_mem_001",
+      "email": "alice@apple-corp.com",
+      "first_name": "Alice",
+      "last_name": "Miller",
+      "department": "Engineering",
+      "job_title": "Software Engineer",
+      "role": "member",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 2,
+      "employment_type": "full_time",
+      "location": "USA"
+    },
+    {
+      "id": "usr_apple_mem_002",
+      "email": "bob@apple-corp.com",
+      "first_name": "Bob",
+      "last_name": "Davis",
+      "department": "Engineering",
+      "job_title": "Backend Engineer",
+      "role": "member",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 2,
+      "employment_type": "full_time",
+      "location": "USA"
+    },
+    {
+      "id": "usr_apple_mem_003",
+      "email": "charlie@apple-corp.com",
+      "first_name": "Charlie",
+      "last_name": "Anderson",
+      "department": "Design",
+      "job_title": "UX Designer",
+      "role": "member",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 2,
+      "employment_type": "full_time",
+      "location": "USA"
+    },
+    {
+      "id": "usr_apple_mem_004",
+      "email": "diana@apple-corp.com",
+      "first_name": "Diana",
+      "last_name": "Thomas",
+      "department": "Marketing",
+      "job_title": "Marketing Specialist",
+      "role": "member",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 2,
+      "employment_type": "full_time",
+      "location": "USA"
+    },
+    {
+      "id": "usr_apple_mem_005",
+      "email": "ethan@apple-corp.com",
+      "first_name": "Ethan",
+      "last_name": "Moore",
+      "department": "Sales",
+      "job_title": "Sales Executive",
+      "role": "member",
+      "tenant_id": "tenant_apple_001",
+      "status": "active",
+      "clearance_level": 2,
+      "employment_type": "full_time",
+      "location": "USA"
+    }
+  ],
+  "groups": [
+    {
+      "id": "grp_eng",
+      "name": "Engineering",
+      "tenant_id": "tenant_apple_001"
+    },
+    {
+      "id": "grp_hr",
+      "name": "HR",
+      "tenant_id": "tenant_apple_001"
+    },
+    {
+      "id": "grp_finance",
+      "name": "Finance",
+      "tenant_id": "tenant_apple_001"
+    },
+    {
+      "id": "grp_marketing",
+      "name": "Marketing",
+      "tenant_id": "tenant_apple_001"
+    }
+  ],
+  "resources": [
+    {
+      "id": "doc_employee_handbook",
+      "name": "Employee Handbook",
+      "type": "document",
+      "department": "HR",
+      "classification": "internal",
+      "owner_user_id": "usr_apple_mod_001",
+      "tenant_id": "tenant_apple_001"
+    },
+    {
+      "id": "doc_payroll_2026",
+      "name": "Payroll Report 2026",
+      "type": "document",
+      "department": "Finance",
+      "classification": "confidential",
+      "owner_user_id": "usr_apple_mod_002",
+      "tenant_id": "tenant_apple_001"
+    },
+    {
+      "id": "doc_architecture_v2",
+      "name": "System Architecture",
+      "type": "document",
+      "department": "Engineering",
+      "classification": "restricted",
+      "owner_user_id": "usr_apple_admin_001",
+      "tenant_id": "tenant_apple_001"
+    },
+    {
+      "id": "project_mobile_app",
+      "name": "Mobile Banking App",
+      "type": "project",
+      "department": "Engineering",
+      "classification": "internal",
+      "owner_user_id": "usr_apple_mem_001",
+      "tenant_id": "tenant_apple_001"
+    }
+  ],
+  "roles": [
+    {
+      "id": "role_owner",
+      "name": "owner",
+      "priority": 100
+    },
+    {
+      "id": "role_admin",
+      "name": "admin",
+      "priority": 80
+    },
+    {
+      "id": "role_moderator",
+      "name": "moderator",
+      "priority": 60
+    },
+    {
+      "id": "role_member",
+      "name": "member",
+      "priority": 40
+    }
+  ],
+  "permissions": [
+    "tenant:create",
+    "tenant:update",
+    "tenant:delete",
+    "user:create",
+    "user:update",
+    "user:delete",
+    "policy:create",
+    "policy:update",
+    "policy:delete",
+    "resource:create",
+    "resource:read",
+    "resource:update",
+    "resource:delete",
+    "resource:approve",
+    "audit:read"
+  ],
+  "policies": [
+    {
+      "policy_id": "pol_member_department_read",
+      "name": "Department Resource Read",
+      "effect": "allow",
+      "actions": [
+        "resource:read"
+      ],
+      "conditions": {
+        "user.department": "resource.department",
+        "user.tenant_id": "resource.tenant_id"
+      }
+    },
+    {
+      "policy_id": "pol_moderator_manage_department",
+      "name": "Moderator Department Access",
+      "effect": "allow",
+      "actions": [
+        "resource:read",
+        "resource:update",
+        "resource:approve"
+      ],
+      "conditions": {
+        "user.role": "moderator",
+        "user.department": "resource.department"
+      }
+    },
+    {
+      "policy_id": "pol_admin_full_tenant",
+      "name": "Admin Tenant Management",
+      "effect": "allow",
+      "actions": [
+        "user:create",
+        "user:update",
+        "resource:create",
+        "resource:read",
+        "resource:update",
+        "policy:create",
+        "policy:update"
+      ],
+      "conditions": {
+        "user.role": "admin",
+        "user.tenant_id": "resource.tenant_id"
+      }
+    },
+    {
+      "policy_id": "pol_owner_super_admin",
+      "name": "Owner Full Access",
+      "effect": "allow",
+      "actions": [
+        "*"
+      ],
+      "conditions": {
+        "user.role": "owner"
+      }
+    }
+  ],
+  "environment": {
+    "access_time": "2026-06-22T10:00:00Z",
+    "country": "USA",
+    "device_trust": "trusted",
+    "mfa_required": true
+  },
+  "authorization_requests": [
+    {
+      "request_id": "auth_req_001",
+      "subject": {
+        "user_id": "usr_apple_mem_001",
+        "role": "member",
+        "department": "Engineering",
+        "tenant_id": "tenant_apple_001"
+      },
+      "resource": {
+        "resource_id": "doc_architecture_v2",
+        "department": "Engineering",
+        "classification": "restricted",
+        "tenant_id": "tenant_apple_001"
+      },
+      "action": "resource:read",
+      "environment": {
+        "mfa_verified": true,
+        "device_trust": "trusted"
+      },
+      "decision": "allow",
+      "matched_policy": "pol_member_department_read"
+    }
+  ]
+}

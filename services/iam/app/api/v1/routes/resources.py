@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query, status
-
 from app.api.v1.dependencies import get_current_user, get_resource_service
 from app.api.v1.schemas.resource import (
     ResourceCreateRequest,
@@ -18,6 +16,7 @@ from app.api.v1.schemas.resource import (
 from app.domain.exceptions import ResourceNotFoundError
 from app.infrastructure.db.models.user import User
 from app.services.resource_service import ResourceService
+from fastapi import APIRouter, Depends, Query, status
 
 router = APIRouter(prefix="/resources", tags=["resources"])
 
@@ -62,11 +61,7 @@ async def get_resource(
     resource_service: ResourceService = Depends(get_resource_service),
 ) -> ResourceOut:
     resource = await resource_service.get(resource_id)
-    visible = (
-        resource.is_public
-        or resource.created_by == current_user.id
-        or current_user.is_superuser
-    )
+    visible = resource.is_public or resource.created_by == current_user.id or current_user.is_superuser
     if not visible:
         # 404, not 403 — don't confirm a private resource's existence to non-owners.
         raise ResourceNotFoundError(f"No resource with id '{resource_id}'")

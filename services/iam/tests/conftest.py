@@ -1,8 +1,4 @@
 import pytest
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
-
 from app.api.v1.dependencies import get_async_db, reset_oidc_client
 from app.core.cache import (
     InMemoryPermissionCache,
@@ -24,6 +20,9 @@ from app.infrastructure.db import (
 )
 from app.infrastructure.db.base import Base
 from app.main import app as app_instance
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -61,9 +60,7 @@ async def test_db():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    testing_session_local = async_sessionmaker(
-        bind=engine, class_=AsyncSession, expire_on_commit=False
-    )
+    testing_session_local = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -105,17 +102,13 @@ def app(test_db):
     # AuthService.logout/change_password/reset_password) go through this on
     # every request, and there's no Redis server here.
     test_token_blacklist = InMemoryTokenBlacklist()
-    app_instance.dependency_overrides[get_token_blacklist] = lambda: (
-        test_token_blacklist
-    )
+    app_instance.dependency_overrides[get_token_blacklist] = lambda: test_token_blacklist
     reset_token_blacklist()
 
     # Same again — OrganizationService resolves member permissions through
     # this for the role-grant escalation guard.
     test_permission_cache = InMemoryPermissionCache()
-    app_instance.dependency_overrides[get_permission_cache] = lambda: (
-        test_permission_cache
-    )
+    app_instance.dependency_overrides[get_permission_cache] = lambda: test_permission_cache
     reset_permission_cache()
 
     # get_oidc_client is a process-wide singleton (so its JWKS cache

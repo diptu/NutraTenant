@@ -10,11 +10,10 @@ surface before deciding what to do next.
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-
-from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings
 from app.core.rate_limit import RateLimiter
@@ -28,8 +27,11 @@ from app.domain.exceptions import (
     InvalidTokenError,
     MfaAlreadyEnabledError,
     MfaNotEnabledError,
+    OrganizationAlreadyExistsError,
+    OrganizationNotFoundError,
     RateLimitExceededError,
     RefreshTokenReusedError,
+    RoleNotFoundError,
     TenantSelectionRequiredError,
     UserNotFoundError,
 )
@@ -37,17 +39,32 @@ from app.domain.value_objects import Email
 from app.infrastructure.db.models.associations import UserOrganizationRole
 from app.infrastructure.db.models.audit_log import AuditLog
 from app.infrastructure.db.models.organization import Organization
+from app.infrastructure.db.models.organization_invitation import (
+    OrganizationInvitation,
+)
 from app.infrastructure.db.models.password_reset_token import PasswordResetToken
 from app.infrastructure.db.models.refresh_token import RefreshToken
 from app.infrastructure.db.models.role import Role
 from app.infrastructure.db.models.user import User
 from app.infrastructure.db.repositories.audit_repo import AuditLogRepository
+from app.infrastructure.db.repositories.organization_invitation_repo import (
+    OrganizationInvitationRepository,
+)
 from app.infrastructure.db.repositories.organization_repo import OrganizationRepository
 from app.infrastructure.db.repositories.password_reset_token_repo import (
     PasswordResetTokenRepository,
 )
 from app.infrastructure.db.repositories.refresh_token_repo import RefreshTokenRepository
+from app.infrastructure.db.repositories.role_repo import RoleRepository
 from app.infrastructure.db.repositories.user_repo import UserRepository
+from app.infrastructure.notifications.email_sender import (
+    send_invite_email,
+    send_tenant_invite_email,
+)
+from app.infrastructure.security.invitation_token import (
+    generate_invitation_token,
+    hash_invitation_token,
+)
 from app.infrastructure.security.jwt import (
     create_access_token,
     create_mfa_challenge_token,
@@ -70,6 +87,12 @@ from app.infrastructure.security.reset_token import (
     generate_reset_token,
     hash_reset_token,
 )
+from app.services.role_lookup import (
+    DEFAULT_ORG_ROLES,
+    provision_role,
+    resolve_role_in_org,
+)
+from sqlalchemy.exc import IntegrityError
 
 
 def _aware(value: datetime) -> datetime:
@@ -129,6 +152,32 @@ class LoginResult:
     previous_last_login_at: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SwitchTenantResult:
+    """``refresh_token`` is only set when the caller had a still-valid
+    refresh token to rotate forward into the new tenant context (see
+    ``AuthService.switch_tenant``) — ``None`` doesn't mean failure, just
+    that there was nothing to rotate."""
+
+    access_token: str
+    refresh_token: str | None
+    organization: Organization
+    role: Role
+
+
+@dataclass(frozen=True, slots=True)
+class TenantBootstrapResult:
+    """``invite_token`` is only set when ``is_new_owner`` is True — an
+    already-existing owner is mapped into the new tenant immediately, with
+    nothing to redeem (see ``AuthService.create_tenant``)."""
+
+    organization: Organization
+    owner: User
+    owner_role: Role
+    is_new_owner: bool
+    invite_token: str | None
+
+
 class AuthService:
     def __init__(
         self,
@@ -146,12 +195,12 @@ class AuthService:
         self._reset_tokens = PasswordResetTokenRepository(session)
         self._audit_log = AuditLogRepository(session)
         self._orgs = OrganizationRepository(session)
+        self._roles = RoleRepository(session)
+        self._invitations = OrganizationInvitationRepository(session)
 
     # -- registration ----------------------------------------------------
 
-    async def register(
-        self, *, email: str, password: str, full_name: str | None
-    ) -> User:
+    async def register(self, *, email: str, password: str, full_name: str | None) -> User:
         normalized_email = Email(email).value
 
         if await self._users.get_by_email(normalized_email) is not None:
@@ -176,19 +225,332 @@ class AuthService:
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            raise EmailAlreadyExistsError(
-                f"'{normalized_email}' is already registered"
-            ) from exc
+            raise EmailAlreadyExistsError(f"'{normalized_email}' is already registered") from exc
 
         await self._audit(event_type="user.registered", user_id=user.id, context={})
         return user
 
+    # -- tenant invitation acceptance (no prior account/session) -----------
+
+    async def accept_invite(
+        self, *, invite_token: str, name: str | None, password: str
+    ) -> tuple[User, Organization, Role]:
+        """Self-service signup via a tenant invitation token — unlike
+        ``OrganizationService.accept_invitation``, this assumes the invitee
+        has *no authenticated session* yet: it creates (or completes) the
+        user, the org membership, and marks the invitation consumed all in
+        the one commit ``_audit`` makes at the end, so a crash partway
+        through never leaves a membership without its invitation marked
+        accepted (or vice versa) — single atomic transaction, not two.
+
+        ``existing_user`` here covers two different cases:
+        - A *real* account (``password_hash`` already set) — rejected.
+          Letting this endpoint set a password for an email that already
+          has working credentials would be a silent account-takeover
+          primitive: anyone holding a valid invite for someone else's email
+          could overwrite their password without ever authenticating as
+          them. A real account must accept via the authenticated
+          POST /organizations/invitations/accept instead.
+        - A *skeleton* account with no password yet (created by
+          ``AuthService.create_tenant`` for a not-yet-registered owner) —
+          completed in place rather than rejected, since it was never a
+          usable account to begin with.
+        """
+        invitation = await self._invitations.get_by_token_hash(hash_invitation_token(invite_token))
+        if (
+            invitation is None
+            or invitation.accepted_at is not None
+            or invitation.revoked_at is not None
+            or _aware(invitation.expires_at) < datetime.now(UTC)
+        ):
+            # Same message for every failure mode — don't help an attacker
+            # narrow down which, same convention as password-reset tokens.
+            raise InvalidTokenError("Invalid or expired invitation token")
+
+        existing_user = await self._users.get_by_email(invitation.email)
+        if existing_user is not None and existing_user.password_hash is not None:
+            raise EmailAlreadyExistsError(
+                f"'{invitation.email}' already has an account — log in and "
+                "accept this invitation from your account instead"
+            )
+
+        organization = await self._orgs.get_by_id(invitation.organization_id)
+        if organization is None:
+            raise OrganizationNotFoundError("This invitation's organization no longer exists")
+
+        role = await self._roles.get_by_code_in_org(invitation.organization_id, invitation.role_code)
+        if role is None:
+            raise RoleNotFoundError(f"No role '{invitation.role_code}' exists in this organization")
+
+        now = datetime.now(UTC)
+        if existing_user is not None:
+            # Complete the skeleton profile in place.
+            user = existing_user
+            user.full_name = name or user.full_name
+            user.password_hash = hash_password(password)
+            # Redeeming a token sent to a specific email is itself proof of
+            # mailbox control — equivalent to clicking a verification link.
+            user.is_verified = True
+            user.updated_at = now
+            user.password_changed_at = now
+        else:
+            user = User(
+                id=uuid.uuid4(),
+                email=invitation.email,
+                full_name=name,
+                password_hash=hash_password(password),
+                attributes=dict(organization.default_attributes or {}),
+                is_active=True,
+                is_verified=True,
+                is_superuser=False,
+                failed_login_count=0,
+                created_at=now,
+                updated_at=now,
+                password_changed_at=now,
+            )
+            self._users.add(user)
+            try:
+                await self._session.flush()
+            except IntegrityError as exc:
+                raise EmailAlreadyExistsError(f"'{invitation.email}' is already registered") from exc
+
+        # A skeleton owner from AuthService.create_tenant is already mapped
+        # into the org (Phase D happens at tenant-creation time, before any
+        # invite is redeemed) — don't insert a second, conflicting row.
+        membership = await self._orgs.get_membership(invitation.organization_id, user.id)
+        if membership is None:
+            membership = UserOrganizationRole(
+                id=uuid.uuid4(),
+                organization_id=invitation.organization_id,
+                user_id=user.id,
+                role_id=role.id,
+                invited_by=invitation.invited_by,
+                is_active=True,
+                joined_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            self._session.add(membership)
+        invitation.accepted_at = now
+
+        await self._audit(
+            event_type="organization.invitation.accepted",
+            user_id=user.id,
+            context={"organization_id": str(invitation.organization_id)},
+        )
+        return user, organization, role
+
+    # -- admin provisioning --------------------------------------------------
+
+    async def provision_user(
+        self, *, email: str, full_name: str | None, tenant_slug: str, role: str
+    ) -> tuple[User, Organization, Role, str]:
+        """Admin-provisions a user directly into a tenant — no invite round
+        trip. The account is never left without a password (a temp one is
+        generated here); ``must_change_password`` forces it to be replaced
+        on first real use. Delivery of the temp password is a stub (see
+        app.infrastructure.notifications.email_sender) since there's no real
+        email provider wired up yet — same "not built yet" situation as
+        every other token/credential delivery path in this service.
+
+        Returns ``(user, organization, role, temp_password)`` — the temp
+        password is for the email stub/caller's own use, never echoed back
+        over the API response itself.
+        """
+        normalized_email = Email(email).value
+        if await self._users.get_by_email(normalized_email) is not None:
+            raise EmailAlreadyExistsError(f"'{normalized_email}' is already registered")
+
+        organization = await self._orgs.get_by_slug(tenant_slug)
+        if organization is None:
+            raise OrganizationNotFoundError(f"No tenant '{tenant_slug}'")
+
+        resolved_role = await resolve_role_in_org(self._roles, organization.id, role)
+        if resolved_role is None:
+            raise RoleNotFoundError(f"No role '{role}' exists in tenant '{tenant_slug}'")
+
+        temp_password = secrets.token_urlsafe(12)
+        now = datetime.now(UTC)
+        user = User(
+            id=uuid.uuid4(),
+            email=normalized_email,
+            full_name=full_name,
+            password_hash=hash_password(temp_password),
+            attributes=dict(organization.default_attributes or {}),
+            is_active=True,
+            is_verified=False,
+            is_superuser=False,
+            failed_login_count=0,
+            must_change_password=True,
+            created_at=now,
+            updated_at=now,
+            password_changed_at=now,
+        )
+        self._users.add(user)
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            raise EmailAlreadyExistsError(f"'{normalized_email}' is already registered") from exc
+
+        membership = UserOrganizationRole(
+            id=uuid.uuid4(),
+            organization_id=organization.id,
+            user_id=user.id,
+            role_id=resolved_role.id,
+            invited_by=None,
+            is_active=True,
+            joined_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        self._session.add(membership)
+
+        await send_invite_email(
+            to=normalized_email,
+            temp_password=temp_password,
+            tenant_name=organization.name,
+        )
+
+        await self._audit(
+            event_type="user.admin_provisioned",
+            user_id=user.id,
+            context={"organization_id": str(organization.id)},
+        )
+        return user, organization, resolved_role, temp_password
+
+    # -- tenant bootstrap (root tenant-creation API) ------------------------
+
+    async def create_tenant(
+        self,
+        *,
+        name: str,
+        tenant_id: str,
+        owner_email: str,
+        plan: str = "free",
+        settings: dict | None = None,
+        metadata: dict | None = None,
+    ) -> TenantBootstrapResult:
+        """Provisions a brand-new tenant end to end: the org row, its
+        standard role set, the owner's membership, and — if the owner's
+        email has no existing account — a skeleton user row plus an invite
+        token to complete it. All in the one commit ``_audit`` makes at the
+        end, so a failure anywhere rolls back the whole thing; no orphaned
+        tenant, no role set without an owner.
+
+        Note on ordering vs. the conceptual A→B→C→D phases this mirrors:
+        the owner user row is resolved/created *before* the Organization
+        row here, not after — `Organization.owner_id` is a NOT NULL FK, so
+        a brand-new owner has to exist first. Everything still lands in the
+        same single transaction either way.
+        """
+        if await self._orgs.get_by_slug(tenant_id) is not None:
+            raise OrganizationAlreadyExistsError(f"Tenant '{tenant_id}' already exists")
+
+        normalized_email = Email(owner_email).value
+        owner = await self._users.get_by_email(normalized_email)
+        is_new_owner = owner is None
+
+        now = datetime.now(UTC)
+        if owner is None:
+            # Skeleton profile — no password yet, not verified. Completed
+            # via POST /auth/accept-invite, same as any other invitation
+            # (see the skeleton-user branch in AuthService.accept_invite).
+            owner = User(
+                id=uuid.uuid4(),
+                email=normalized_email,
+                full_name=None,
+                password_hash=None,
+                attributes={},
+                is_active=True,
+                is_verified=False,
+                is_superuser=False,
+                failed_login_count=0,
+                created_at=now,
+                updated_at=now,
+            )
+            self._users.add(owner)
+            await self._session.flush()
+
+        org = Organization(
+            id=uuid.uuid4(),
+            name=name,
+            slug=tenant_id,
+            description=None,
+            owner_id=owner.id,
+            is_active=True,
+            default_attributes={},
+            plan=plan,
+            settings=settings or {},
+            extra_metadata=metadata or {},
+            created_at=now,
+            updated_at=now,
+        )
+        self._orgs.add(org)
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            raise OrganizationAlreadyExistsError(f"Tenant '{tenant_id}' already exists") from exc
+
+        roles = {
+            code: await provision_role(self._session, self._roles, org.id, code=code, name=display_name)
+            for code, display_name in DEFAULT_ORG_ROLES
+        }
+        owner_role = roles["owner"]
+
+        membership = UserOrganizationRole(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            user_id=owner.id,
+            role_id=owner_role.id,
+            invited_by=None,
+            is_active=True,
+            joined_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        self._session.add(membership)
+
+        invite_token: str | None = None
+        if is_new_owner:
+            raw_token, token_hash = generate_invitation_token()
+            invite_token = raw_token
+            invitation = OrganizationInvitation(
+                id=uuid.uuid4(),
+                organization_id=org.id,
+                email=normalized_email,
+                role_code=owner_role.code,
+                token_hash=token_hash,
+                invited_by=None,
+                expires_at=now + timedelta(minutes=self._settings.organization_invitation_expire_minutes),
+                created_at=now,
+            )
+            self._invitations.add(invitation)
+            await send_tenant_invite_email(to=normalized_email, invite_token=raw_token, tenant_name=name)
+
+        await self._audit(
+            event_type="tenant.created",
+            user_id=owner.id,
+            context={"organization_id": str(org.id), "new_owner": is_new_owner},
+        )
+        return TenantBootstrapResult(
+            organization=org,
+            owner=owner,
+            owner_role=owner_role,
+            is_new_owner=is_new_owner,
+            invite_token=invite_token,
+        )
+
     # -- tenant resolution -------------------------------------------------
 
     async def _resolve_tenant(
-        self, user_id: uuid.UUID, tenant_id: uuid.UUID | None
+        self, user_id: uuid.UUID, tenant_id: str | None
     ) -> tuple[Organization | None, UserOrganizationRole | None]:
         """Picks which organization (if any) a session is bound to.
+
+        ``tenant_id`` is the organization's *slug* (e.g. ``"apple_corp"``),
+        not its primary key — matching the `tenant_id` claim already embedded
+        on the access token and every other `tenant_id` field on the wire
+        (``TenantOut.tenant_id``, the invite/admin/switch-tenant endpoints).
 
         - ``tenant_id`` given: must be one of the user's memberships, else
           ``ForbiddenError`` (403) — the org exists, the account just can't
@@ -202,7 +564,7 @@ class AuthService:
         organizations = await self._orgs.list_for_user(user_id)
 
         if tenant_id is not None:
-            organization = next((o for o in organizations if o.id == tenant_id), None)
+            organization = next((o for o in organizations if o.slug == tenant_id), None)
             if organization is None:
                 raise ForbiddenError("You are not a member of this organization")
         elif not organizations:
@@ -211,10 +573,7 @@ class AuthService:
             organization = organizations[0]
         else:
             raise TenantSelectionRequiredError(
-                organizations=[
-                    {"id": str(o.id), "tenant_id": o.slug, "name": o.name}
-                    for o in organizations
-                ]
+                organizations=[{"id": str(o.id), "tenant_id": o.slug, "name": o.name} for o in organizations]
             )
 
         membership = await self._orgs.get_membership(organization.id, user_id)
@@ -230,7 +589,7 @@ class AuthService:
         password: str,
         ip_address: str | None,
         user_agent: str | None,
-        tenant_id: uuid.UUID | None = None,
+        tenant_id: str | None = None,
     ) -> LoginResult:
         normalized_email = Email(email).value
 
@@ -249,9 +608,7 @@ class AuthService:
                 user_agent=user_agent,
                 context={"email": normalized_email},
             )
-            raise RateLimitExceededError(
-                retry_after_seconds=rate_limit.retry_after_seconds
-            )
+            raise RateLimitExceededError(retry_after_seconds=rate_limit.retry_after_seconds)
 
         user = await self._users.get_by_email(normalized_email)
 
@@ -261,18 +618,12 @@ class AuthService:
             # they authenticate.
             raise InvalidCredentialsError("Invalid email or password")
 
-        if user.locked_until is not None and _aware(user.locked_until) > datetime.now(
-            UTC
-        ):
-            retry_after = int(
-                (_aware(user.locked_until) - datetime.now(UTC)).total_seconds()
-            )
+        if user.locked_until is not None and _aware(user.locked_until) > datetime.now(UTC):
+            retry_after = int((_aware(user.locked_until) - datetime.now(UTC)).total_seconds())
             raise AccountLockedError(retry_after_seconds=max(retry_after, 1))
 
         if not verify_password(password, user.password_hash):
-            await self._record_failed_login(
-                user, ip_address=ip_address, user_agent=user_agent
-            )
+            await self._record_failed_login(user, ip_address=ip_address, user_agent=user_agent)
             raise InvalidCredentialsError("Invalid email or password")
 
         # Resolved (and any TenantSelectionRequiredError/ForbiddenError
@@ -367,9 +718,7 @@ class AuthService:
 
         challenge_key = _mfa_challenge_blacklist_key(claims.jti)
         if await self._token_blacklist.contains_jti(challenge_key):
-            raise InvalidTokenError(
-                "MFA challenge has already been used or has been locked"
-            )
+            raise InvalidTokenError("MFA challenge has already been used or has been locked")
 
         user = await self._users.get_by_id(claims.subject_id)
         if user is None or not user.is_active or not user.mfa_enabled:
@@ -384,9 +733,7 @@ class AuthService:
             window_seconds=self._settings.rate_limit_window_seconds,
         )
         if not rate_limit.allowed:
-            raise RateLimitExceededError(
-                retry_after_seconds=rate_limit.retry_after_seconds
-            )
+            raise RateLimitExceededError(retry_after_seconds=rate_limit.retry_after_seconds)
 
         challenge_ttl_seconds = self._settings.mfa_challenge_token_expire_minutes * 60
         challenge_attempts = await self._rate_limiter.hit(
@@ -395,9 +742,7 @@ class AuthService:
             window_seconds=challenge_ttl_seconds,
         )
         if not challenge_attempts.allowed:
-            await self._token_blacklist.add_jti(
-                challenge_key, ttl_seconds=challenge_ttl_seconds
-            )
+            await self._token_blacklist.add_jti(challenge_key, ttl_seconds=challenge_ttl_seconds)
             await self._audit(
                 event_type="auth.mfa.challenge_locked",
                 user_id=user.id,
@@ -405,9 +750,7 @@ class AuthService:
                 user_agent=user_agent,
                 context={"max_attempts": _MFA_CHALLENGE_MAX_ATTEMPTS},
             )
-            raise InvalidTokenError(
-                "MFA challenge locked after too many failed attempts"
-            )
+            raise InvalidTokenError("MFA challenge locked after too many failed attempts")
 
         if not await self._consume_mfa_code(user, code):
             await self._audit(
@@ -421,21 +764,15 @@ class AuthService:
 
         # Single-use: burn the challenge the instant it's successfully
         # redeemed, regardless of how much of its own TTL is left.
-        remaining_seconds = max(
-            int((claims.expires_at - datetime.now(UTC)).total_seconds()), 1
-        )
-        await self._token_blacklist.add_jti(
-            challenge_key, ttl_seconds=remaining_seconds
-        )
+        remaining_seconds = max(int((claims.expires_at - datetime.now(UTC)).total_seconds()), 1)
+        await self._token_blacklist.add_jti(challenge_key, ttl_seconds=remaining_seconds)
 
         organization: Organization | None = None
         role: Role | None = None
         if claims.organization_id is not None:
             organization = await self._orgs.get_by_id(claims.organization_id)
             if organization is not None:
-                membership = await self._orgs.get_membership(
-                    claims.organization_id, user.id
-                )
+                membership = await self._orgs.get_membership(claims.organization_id, user.id)
                 # Membership may have been revoked since the challenge was
                 # issued — drop tenant context silently rather than fail a
                 # password+MFA-correct login over a stale claim.
@@ -483,13 +820,88 @@ class AuthService:
 
         code_hash = hash_recovery_code(code)
         if code_hash in user.mfa_recovery_codes:
-            user.mfa_recovery_codes = [
-                stored for stored in user.mfa_recovery_codes if stored != code_hash
-            ]
+            user.mfa_recovery_codes = [stored for stored in user.mfa_recovery_codes if stored != code_hash]
             user.updated_at = datetime.now(UTC)
             return True
 
         return False
+
+    # -- tenant switching --------------------------------------------------
+
+    async def switch_tenant(
+        self,
+        *,
+        user: User,
+        tenant_slug: str,
+        ip_address: str | None,
+        user_agent: str | None,
+        current_refresh_token: str | None,
+    ) -> SwitchTenantResult:
+        """Re-mints the caller's access token under a *different* tenant
+        they already have an active membership in — no re-authentication.
+
+        Best-effort rotates ``current_refresh_token`` (if it's still a live,
+        unrevoked token belonging to this user) into the new tenant context
+        too, via the same rotation machinery as a normal /refresh — without
+        this, a later silent token refresh would re-resolve the *old*
+        ``stored.organization_id`` and silently revert the switch. A caller
+        with no usable refresh token on hand still succeeds with a
+        standalone access token; there's just nothing to carry forward.
+        """
+        organization = await self._orgs.get_by_slug(tenant_slug)
+        if organization is None:
+            raise OrganizationNotFoundError(f"No tenant '{tenant_slug}'")
+
+        membership = await self._orgs.get_membership(organization.id, user.id)
+        if membership is None or not membership.is_active:
+            raise ForbiddenError("You are not an active member of this tenant")
+
+        stored: RefreshToken | None = None
+        if current_refresh_token is not None:
+            try:
+                refresh_claims = decode_refresh_token(self._settings, current_refresh_token)
+            except InvalidTokenError:
+                refresh_claims = None
+            if refresh_claims is not None and refresh_claims.subject_id == user.id:
+                candidate = await self._refresh_tokens.get_by_id(refresh_claims.jti)
+                if candidate is not None and candidate.revoked_at is None:
+                    stored = candidate
+
+        if stored is not None:
+            token_pair = await self._issue_token_pair(
+                user,
+                family_id=stored.family_id,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                rotates=stored,
+                organization=organization,
+                role=membership.role,
+            )
+            access_token = token_pair.access_token
+            refresh_token_out: str | None = token_pair.refresh_token
+        else:
+            access_token = create_access_token(
+                self._settings,
+                user_id=user.id,
+                attributes=user.attributes,
+                tenant_id=organization.slug,
+                role=membership.role.name,
+            )
+            refresh_token_out = None
+
+        await self._audit(
+            event_type="auth.tenant_switched",
+            user_id=user.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            context={"organization_id": str(organization.id)},
+        )
+        return SwitchTenantResult(
+            access_token=access_token,
+            refresh_token=refresh_token_out,
+            organization=organization,
+            role=membership.role,
+        )
 
     # -- MFA enrollment ---------------------------------------------------
 
@@ -507,9 +919,7 @@ class AuthService:
         secret = generate_totp_secret()
         user.mfa_secret_encrypted = encrypt_secret(self._settings, secret)
         user.updated_at = datetime.now(UTC)
-        await self._audit(
-            event_type="auth.mfa.setup_started", user_id=user.id, context={}
-        )
+        await self._audit(event_type="auth.mfa.setup_started", user_id=user.id, context={})
         return secret, build_otpauth_uri(secret=secret, account_email=user.email)
 
     async def confirm_mfa(self, *, user_id: uuid.UUID, code: str) -> list[str]:
@@ -535,9 +945,7 @@ class AuthService:
         await self._audit(event_type="auth.mfa.enabled", user_id=user.id, context={})
         return recovery_codes
 
-    async def disable_mfa(
-        self, *, user_id: uuid.UUID, current_password: str, code: str
-    ) -> None:
+    async def disable_mfa(self, *, user_id: uuid.UUID, current_password: str, code: str) -> None:
         """Disabling lowers account security, so it's gated the same way as
         a password change: the current password *and* a live MFA code."""
         user = await self._users.get_by_id(user_id)
@@ -545,9 +953,7 @@ class AuthService:
             raise UserNotFoundError(f"No user with id '{user_id}'")
         if not user.mfa_enabled:
             raise MfaNotEnabledError("MFA is not enabled for this account")
-        if user.password_hash is None or not verify_password(
-            current_password, user.password_hash
-        ):
+        if user.password_hash is None or not verify_password(current_password, user.password_hash):
             raise InvalidCredentialsError("Invalid password")
         if not await self._consume_mfa_code(user, code):
             raise InvalidMfaCodeError("Invalid MFA code")
@@ -649,9 +1055,7 @@ class AuthService:
         if stored.organization_id is not None:
             organization = await self._orgs.get_by_id(stored.organization_id)
             if organization is not None:
-                membership = await self._orgs.get_membership(
-                    stored.organization_id, user.id
-                )
+                membership = await self._orgs.get_membership(stored.organization_id, user.id)
                 organization = organization if membership is not None else None
                 role = membership.role if membership is not None else None
 
@@ -699,12 +1103,18 @@ class AuthService:
             organization_id=organization.id if organization else None,
         )
         self._refresh_tokens.add(new_row)
+        # Flush the INSERT before the UPDATE below: replaced_by_jti is a
+        # self-referential FK on this same table, and SQLAlchemy's unit-of-
+        # work only topologically sorts same-flush operations using declared
+        # relationships, not raw FK columns — so in one flush it can (and on
+        # Postgres, did) emit the UPDATE before the new row's INSERT,
+        # violating fk_refresh_tokens_replaced_by_jti_refresh_tokens.
+        await self._session.flush()
 
         if rotates is not None:
             rotates.revoked_at = datetime.now(UTC)
             rotates.replaced_by_jti = new_jti
-
-        await self._session.flush()
+            await self._session.flush()
 
         access_token = create_access_token(
             self._settings,
@@ -713,9 +1123,7 @@ class AuthService:
             tenant_id=organization.slug if organization else None,
             role=role.name if role else None,
         )
-        access_expires_at = issued_at + timedelta(
-            minutes=self._settings.access_token_expire_minutes
-        )
+        access_expires_at = issued_at + timedelta(minutes=self._settings.access_token_expire_minutes)
         refresh_token_str = create_refresh_token(
             self._settings,
             user_id=user.id,
@@ -733,9 +1141,7 @@ class AuthService:
 
     # -- logout --------------------------------------------------------------
 
-    async def logout(
-        self, *, refresh_token: str | None, access_token: str | None
-    ) -> None:
+    async def logout(self, *, refresh_token: str | None, access_token: str | None) -> None:
         if refresh_token:
             try:
                 claims = decode_refresh_token(self._settings, refresh_token)
@@ -743,9 +1149,7 @@ class AuthService:
                 claims = None
             if claims is not None:
                 await self._refresh_tokens.revoke_family(claims.family_id)
-                await self._audit(
-                    event_type="auth.logout", user_id=claims.subject_id, context={}
-                )
+                await self._audit(event_type="auth.logout", user_id=claims.subject_id, context={})
 
         if access_token:
             try:
@@ -757,27 +1161,22 @@ class AuthService:
                     int((access_claims.expires_at - datetime.now(UTC)).total_seconds()),
                     1,
                 )
-                await self._token_blacklist.add_jti(
-                    str(access_claims.jti), ttl_seconds=ttl_seconds
-                )
+                await self._token_blacklist.add_jti(str(access_claims.jti), ttl_seconds=ttl_seconds)
 
     # -- password management ---------------------------------------------------
 
-    async def change_password(
-        self, *, user_id: uuid.UUID, current_password: str, new_password: str
-    ) -> None:
+    async def change_password(self, *, user_id: uuid.UUID, current_password: str, new_password: str) -> None:
         user = await self._users.get_by_id(user_id)
         if user is None:
             raise UserNotFoundError(f"No user with id '{user_id}'")
-        if user.password_hash is None or not verify_password(
-            current_password, user.password_hash
-        ):
+        if user.password_hash is None or not verify_password(current_password, user.password_hash):
             raise InvalidCredentialsError("Current password is incorrect")
 
         now = datetime.now(UTC)
         user.password_hash = hash_password(new_password)
         user.password_changed_at = now
         user.updated_at = now
+        user.must_change_password = False
 
         # A credential change invalidates every session started under the
         # old credential — not just the one making this request. Refresh
@@ -786,9 +1185,7 @@ class AuthService:
         # via invalidate_before instead (no jti to target individually).
         await self._refresh_tokens.revoke_all_for_user(user_id)
         await self._invalidate_access_tokens_issued_before(user_id, now)
-        await self._audit(
-            event_type="auth.password.changed", user_id=user_id, context={}
-        )
+        await self._audit(event_type="auth.password.changed", user_id=user_id, context={})
 
     async def request_password_reset(self, *, email: str) -> str | None:
         """Returns the raw reset token only when `settings.debug` is set —
@@ -805,9 +1202,7 @@ class AuthService:
 
         raw_token, token_hash = generate_reset_token()
         now = datetime.now(UTC)
-        expires_at = now + timedelta(
-            minutes=self._settings.password_reset_token_expire_minutes
-        )
+        expires_at = now + timedelta(minutes=self._settings.password_reset_token_expire_minutes)
         self._reset_tokens.add(
             PasswordResetToken(
                 token_hash=token_hash,
@@ -817,16 +1212,12 @@ class AuthService:
             )
         )
         await self._session.flush()
-        await self._audit(
-            event_type="auth.password.reset_requested", user_id=user.id, context={}
-        )
+        await self._audit(event_type="auth.password.reset_requested", user_id=user.id, context={})
 
         return raw_token if self._settings.debug else None
 
     async def reset_password(self, *, raw_token: str, new_password: str) -> None:
-        token_row = await self._reset_tokens.get_by_token_hash(
-            hash_reset_token(raw_token)
-        )
+        token_row = await self._reset_tokens.get_by_token_hash(hash_reset_token(raw_token))
 
         if (
             token_row is None
@@ -845,17 +1236,14 @@ class AuthService:
         user.password_hash = hash_password(new_password)
         user.password_changed_at = now
         user.updated_at = now
+        user.must_change_password = False
         token_row.used_at = now
 
         await self._refresh_tokens.revoke_all_for_user(user.id)
         await self._invalidate_access_tokens_issued_before(user.id, now)
-        await self._audit(
-            event_type="auth.password.reset_completed", user_id=user.id, context={}
-        )
+        await self._audit(event_type="auth.password.reset_completed", user_id=user.id, context={})
 
-    async def _invalidate_access_tokens_issued_before(
-        self, user_id: uuid.UUID, when: datetime
-    ) -> None:
+    async def _invalidate_access_tokens_issued_before(self, user_id: uuid.UUID, when: datetime) -> None:
         # NOTE: JWT `iat` is always encoded/decoded as an integer unix
         # timestamp, so a token issued in the *same wall-clock second* as
         # this call is ambiguous (its floored iat can't be ordered against

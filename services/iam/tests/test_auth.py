@@ -34,15 +34,11 @@ def unique_email() -> str:
 
 
 async def _register(client, email: str, password: str = "StrongPass1!"):
-    return await client.post(
-        "/api/v1/auth/register", json={"email": email, "password": password}
-    )
+    return await client.post("/api/v1/auth/register", json={"email": email, "password": password})
 
 
 async def _login(client, email: str, password: str = "StrongPass1!"):
-    return await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": password}
-    )
+    return await client.post("/api/v1/auth/login", json={"email": email, "password": password})
 
 
 # ===========================================================================
@@ -61,9 +57,7 @@ class TestRegisterRegression:
         assert "password_hash" not in data
 
     @pytest.mark.anyio
-    async def test_register_duplicate_email_returns_409(
-        self, https_client, unique_email
-    ):
+    async def test_register_duplicate_email_returns_409(self, https_client, unique_email):
         await _register(https_client, unique_email)
         response = await _register(https_client, unique_email)
         assert response.status_code == 409
@@ -88,9 +82,7 @@ class TestRegisterRegression:
 
 class TestLoginRegression:
     @pytest.mark.anyio
-    async def test_login_returns_access_token_and_refresh_cookie(
-        self, https_client, unique_email
-    ):
+    async def test_login_returns_access_token_and_refresh_cookie(self, https_client, unique_email):
         await _register(https_client, unique_email)
         response = await _login(https_client, unique_email)
 
@@ -117,15 +109,11 @@ class TestLoginRegression:
 
     @pytest.mark.anyio
     async def test_login_missing_fields_returns_422(self, https_client):
-        response = await https_client.post(
-            "/api/v1/auth/login", json={"email": "", "password": ""}
-        )
+        response = await https_client.post("/api/v1/auth/login", json={"email": "", "password": ""})
         assert response.status_code == 422
 
     @pytest.mark.anyio
-    async def test_login_sets_httponly_secure_refresh_cookie(
-        self, https_client, unique_email
-    ):
+    async def test_login_sets_httponly_secure_refresh_cookie(self, https_client, unique_email):
         await _register(https_client, unique_email)
         response = await _login(https_client, unique_email)
 
@@ -147,9 +135,7 @@ class TestGetMe:
         assert response.status_code == 401
 
     @pytest.mark.anyio
-    async def test_get_me_with_access_token_returns_profile(
-        self, https_client, unique_email
-    ):
+    async def test_get_me_with_access_token_returns_profile(self, https_client, unique_email):
         await _register(https_client, unique_email)
         login_resp = await _login(https_client, unique_email)
         access_token = login_resp.json()["access_token"]
@@ -185,9 +171,7 @@ class TestOpenApiSchema:
         assert response.status_code == 200
         schema = response.json()
         schemes = schema.get("components", {}).get("securitySchemes", {})
-        assert schemes, (
-            "securitySchemes missing — Swagger Authorize button will not appear"
-        )
+        assert schemes, "securitySchemes missing — Swagger Authorize button will not appear"
         assert any(s.get("scheme") == "bearer" for s in schemes.values())
 
     @pytest.mark.anyio
@@ -196,9 +180,7 @@ class TestOpenApiSchema:
         response = await https_client.get("/openapi.json")
         schema = response.json()
         me_op = schema["paths"]["/api/v1/users/me"]["get"]
-        assert me_op.get("security"), (
-            "Lock icon missing — no security requirement in OpenAPI spec"
-        )
+        assert me_op.get("security"), "Lock icon missing — no security requirement in OpenAPI spec"
 
     @pytest.mark.anyio
     async def test_login_endpoint_has_no_security_lock(self, https_client):
@@ -206,6 +188,4 @@ class TestOpenApiSchema:
         response = await https_client.get("/openapi.json")
         schema = response.json()
         login_op = schema["paths"]["/api/v1/auth/login"]["post"]
-        assert not login_op.get("security"), (
-            "Login endpoint must remain open (no auth requirement)"
-        )
+        assert not login_op.get("security"), "Login endpoint must remain open (no auth requirement)"

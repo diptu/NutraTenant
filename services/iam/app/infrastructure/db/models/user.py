@@ -9,12 +9,11 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from app.infrastructure.db.base import Base
+from app.infrastructure.db.types import PortableJSONB
 from sqlalchemy import Boolean, DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.infrastructure.db.base import Base
-from app.infrastructure.db.types import PortableJSONB
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.associations import UserOrganizationRole
@@ -23,9 +22,7 @@ if TYPE_CHECKING:
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     full_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -36,30 +33,27 @@ class User(Base):
     oauth_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Google's stable, unique `sub` claim — the actual federation join key.
-    google_subject: Mapped[str | None] = mapped_column(
-        String(255), unique=True, nullable=True
-    )
+    google_subject: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
 
     # Dynamic ABAC subject attributes (department, clearance, region, ...).
-    attributes: Mapped[dict] = mapped_column(
-        PortableJSONB, nullable=False, default=dict, server_default="{}"
-    )
+    attributes: Mapped[dict] = mapped_column(PortableJSONB, nullable=False, default=dict, server_default="{}")
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_superuser: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    last_login_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    locked_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    password_changed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Set on admin-provisioned accounts (a temp password was generated on
+    # their behalf, see AuthService.provision_user) — cleared the moment the
+    # password is actually changed (change_password/reset_password). Not a
+    # general-purpose "status" enum: this is the one concrete, enforceable
+    # condition that distinguishes an "INVITED" account from an "ACTIVE" one.
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # TOTP-based MFA. The secret is encrypted at rest (Fernet, see
     # app/infrastructure/security/mfa.py) rather than hashed like a
@@ -73,12 +67,8 @@ class User(Base):
         PortableJSONB, nullable=False, default=list, server_default="[]"
     )
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     org_roles: Mapped[list[UserOrganizationRole]] = relationship(
         back_populates="user",

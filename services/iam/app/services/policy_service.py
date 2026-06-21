@@ -10,8 +10,6 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy.exc import IntegrityError
-
 from app.domain.exceptions import (
     InvalidPolicyConditionsError,
     PolicyAlreadyExistsError,
@@ -22,6 +20,7 @@ from app.infrastructure.db.models.audit_log import AuditLog
 from app.infrastructure.db.models.policy import Policy
 from app.infrastructure.db.repositories.audit_repo import AuditLogRepository
 from app.infrastructure.db.repositories.policy_repo import PolicyRepository
+from sqlalchemy.exc import IntegrityError
 
 _VALID_EFFECTS = ("allow", "deny")
 
@@ -77,9 +76,7 @@ class PolicyService:
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            raise PolicyAlreadyExistsError(
-                f"A policy named '{name}' already exists"
-            ) from exc
+            raise PolicyAlreadyExistsError(f"A policy named '{name}' already exists") from exc
 
         await self._audit(
             event_type="abac.policy.created",
@@ -141,9 +138,7 @@ class PolicyService:
 
     def _validate_effect(self, effect: str) -> None:
         if effect not in _VALID_EFFECTS:
-            raise InvalidPolicyConditionsError(
-                f"effect must be one of {_VALID_EFFECTS}, got '{effect}'"
-            )
+            raise InvalidPolicyConditionsError(f"effect must be one of {_VALID_EFFECTS}, got '{effect}'")
 
     def _validate_conditions(self, conditions: dict | None) -> None:
         try:
@@ -151,9 +146,7 @@ class PolicyService:
         except ConditionError as exc:
             raise InvalidPolicyConditionsError(str(exc)) from exc
 
-    async def _audit(
-        self, *, event_type: str, actor_id: uuid.UUID, policy: Policy, extra: dict
-    ) -> None:
+    async def _audit(self, *, event_type: str, actor_id: uuid.UUID, policy: Policy, extra: dict) -> None:
         self._audit_log.add(
             AuditLog(
                 id=uuid.uuid4(),

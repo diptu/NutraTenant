@@ -3,10 +3,9 @@
 import uuid
 from typing import Generic, TypeVar
 
+from app.infrastructure.db.base import Base
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.infrastructure.db.base import Base
 
 ModelT = TypeVar("ModelT", bound=Base)
 

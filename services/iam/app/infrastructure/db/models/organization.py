@@ -6,12 +6,11 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from app.infrastructure.db.base import Base
+from app.infrastructure.db.types import PortableJSONB
 from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.infrastructure.db.base import Base
-from app.infrastructure.db.types import PortableJSONB
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.associations import UserOrganizationRole
@@ -20,9 +19,7 @@ if TYPE_CHECKING:
 class Organization(Base):
     __tablename__ = "organizations"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -38,13 +35,22 @@ class Organization(Base):
         PortableJSONB, nullable=False, default=dict, server_default="{}"
     )
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+    plan: Mapped[str] = mapped_column(String(50), nullable=False, default="free", server_default="free")
+    # Operational tenant config (allow_self_signup, mfa_required,
+    # session_timeout_minutes, password_policy, ...) — distinct from
+    # `default_attributes` above, which is specifically the ABAC template
+    # merged into *members'* attribute bags, not tenant-level operational
+    # config read by the tenant itself.
+    settings: Mapped[dict] = mapped_column(PortableJSONB, nullable=False, default=dict, server_default="{}")
+    # Free-form descriptive metadata (industry, region, timezone, ...).
+    # Mapped to the `metadata` column under a different Python attribute
+    # name since `metadata` is reserved on declarative models (it's
+    # SQLAlchemy's own MetaData object).
+    extra_metadata: Mapped[dict] = mapped_column(
+        "metadata", PortableJSONB, nullable=False, default=dict, server_default="{}"
     )
 
-    members: Mapped[list[UserOrganizationRole]] = relationship(
-        back_populates="organization", lazy="raise"
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    members: Mapped[list[UserOrganizationRole]] = relationship(back_populates="organization", lazy="raise")

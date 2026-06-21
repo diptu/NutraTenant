@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, status
-
 from app.api.v1.dependencies import (
     get_current_user,
     get_organization_service,
@@ -33,13 +31,12 @@ from app.infrastructure.db.models.role import Role
 from app.infrastructure.db.models.user import User
 from app.services.organization_service import OrganizationService
 from app.services.role_service import RoleService
+from fastapi import APIRouter, Depends, status
 
 router = APIRouter(prefix="/roles", tags=["roles"])
 
 
-async def _ensure_can_manage_role(
-    role: Role, current_user: User, org_service: OrganizationService
-) -> None:
+async def _ensure_can_manage_role(role: Role, current_user: User, org_service: OrganizationService) -> None:
     if current_user.is_superuser:
         return
     if role.organization_id is None:
@@ -97,10 +94,7 @@ async def list_user_roles(
     if not current_user.is_superuser and current_user.id != user_id:
         raise ForbiddenError("You can only view your own role assignments")
     assignments = await role_service.list_user_roles(user_id)
-    return [
-        UserRoleOut(user_id=a.user_id, role_id=a.role_id, role_code=a.role.code)
-        for a in assignments
-    ]
+    return [UserRoleOut(user_id=a.user_id, role_id=a.role_id, role_code=a.role.code) for a in assignments]
 
 
 @router.get("/{role_id}", response_model=RoleOut)
@@ -201,9 +195,7 @@ async def assign_role(
     return UserRoleOut(user_id=assignment.user_id, role_id=role_id, role_code=role.code)
 
 
-@router.delete(
-    "/{role_id}/assignments/{user_id}", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.delete("/{role_id}/assignments/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_role(
     role_id: uuid.UUID,
     user_id: uuid.UUID,

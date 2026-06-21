@@ -6,11 +6,12 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from app.api.v1.schemas.user import UserOut
 from pydantic import BaseModel, EmailStr, Field
 
-from app.api.v1.schemas.user import UserOut
-
 __all__ = [
+    "AcceptInviteRequest",
+    "AcceptInviteResponse",
     "ChangePasswordRequest",
     "ForgotPasswordRequest",
     "ForgotPasswordResponse",
@@ -28,6 +29,8 @@ __all__ = [
     "ResetPasswordRequest",
     "RoleOut",
     "SessionOut",
+    "SwitchTenantRequest",
+    "SwitchTenantResponse",
     "TenantOut",
     "TokenResponse",
     "UserOut",
@@ -43,10 +46,11 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
-    # Disambiguates which organization to bind the session to when the
-    # account belongs to more than one — see AuthService._resolve_tenant.
-    # Omit it when the account has zero or one organization.
-    tenant_id: uuid.UUID | None = None
+    # The organization's *slug* (e.g. "apple_corp"), not its id — disambiguates
+    # which organization to bind the session to when the account belongs to
+    # more than one. See AuthService._resolve_tenant. Omit it when the
+    # account has zero or one organization.
+    tenant_id: str | None = None
 
 
 class RefreshRequest(BaseModel):
@@ -161,3 +165,26 @@ class MfaDisableRequest(BaseModel):
 class MfaLoginVerifyRequest(BaseModel):
     mfa_challenge_token: str
     code: str = Field(min_length=6, max_length=32)
+
+
+class AcceptInviteRequest(BaseModel):
+    invite_token: str
+    name: str | None = Field(default=None, max_length=150)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class AcceptInviteResponse(BaseModel):
+    user_id: uuid.UUID
+    tenant_id: str
+    role: str
+    status: str
+
+
+class SwitchTenantRequest(BaseModel):
+    tenant_id: str
+
+
+class SwitchTenantResponse(BaseModel):
+    access_token: str
+    tenant_id: str
+    role: str

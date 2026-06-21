@@ -13,13 +13,16 @@ same shape as `app.core.rate_limit` and `app.core.config.get_settings()`.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Protocol
 
-from redis.asyncio import Redis
-
 from app.core.config import get_settings
 from app.core.redis_client import try_build_redis_client
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
+
+logger = logging.getLogger(__name__)
 
 
 class TokenBlacklist(Protocol):
@@ -27,9 +30,7 @@ class TokenBlacklist(Protocol):
 
     async def contains_jti(self, jti: str) -> bool: ...
 
-    async def set_invalidate_before(
-        self, user_id: str, *, timestamp: float, ttl_seconds: int
-    ) -> None: ...
+    async def set_invalidate_before(self, user_id: str, *, timestamp: float, ttl_seconds: int) -> None: ...
 
     async def get_invalidate_before(self, user_id: str) -> float | None: ...
 
@@ -51,9 +52,7 @@ class InMemoryTokenBlacklist:
             return False
         return True
 
-    async def set_invalidate_before(
-        self, user_id: str, *, timestamp: float, ttl_seconds: int
-    ) -> None:
+    async def set_invalidate_before(self, user_id: str, *, timestamp: float, ttl_seconds: int) -> None:
         self._invalidate_before[user_id] = (timestamp, time.monotonic() + ttl_seconds)
 
     async def get_invalidate_before(self, user_id: str) -> float | None:
@@ -72,20 +71,34 @@ class RedisTokenBlacklist:
         self._redis = redis_client
 
     async def add_jti(self, jti: str, ttl_seconds: int) -> None:
-        await self._redis.set(f"blacklist:jti:{jti}", "1", ex=ttl_seconds)
+        try:
+            await self._redis.set(f"blacklist:jti:{jti}", "1", ex=ttl_seconds)
+        except RedisError:
+            # Same fail-open reasoning as RedisRateLimiter.hit: an outage in
+            # Redis (the blacklist's own backend) must never 500 the request
+            # that triggered the revocation (e.g. logout) — the revocation
+            # just won't take effect until Redis is back.
+            logger.warning("Redis unreachable for token blacklist; revocation not recorded", exc_info=True)
 
     async def contains_jti(self, jti: str) -> bool:
-        return bool(await self._redis.exists(f"blacklist:jti:{jti}"))
+        try:
+            return bool(await self._redis.exists(f"blacklist:jti:{jti}"))
+        except RedisError:
+            logger.warning("Redis unreachable for token blacklist; allowing request", exc_info=True)
+            return False
 
-    async def set_invalidate_before(
-        self, user_id: str, *, timestamp: float, ttl_seconds: int
-    ) -> None:
-        await self._redis.set(
-            f"blacklist:invalidate_before:{user_id}", str(timestamp), ex=ttl_seconds
-        )
+    async def set_invalidate_before(self, user_id: str, *, timestamp: float, ttl_seconds: int) -> None:
+        try:
+            await self._redis.set(f"blacklist:invalidate_before:{user_id}", str(timestamp), ex=ttl_seconds)
+        except RedisError:
+            logger.warning("Redis unreachable for token blacklist; revocation not recorded", exc_info=True)
 
     async def get_invalidate_before(self, user_id: str) -> float | None:
-        value = await self._redis.get(f"blacklist:invalidate_before:{user_id}")
+        try:
+            value = await self._redis.get(f"blacklist:invalidate_before:{user_id}")
+        except RedisError:
+            logger.warning("Redis unreachable for token blacklist; allowing request", exc_info=True)
+            return None
         return float(value) if value is not None else None
 
 
@@ -96,11 +109,7 @@ def get_token_blacklist() -> TokenBlacklist:
     global _token_blacklist
     if _token_blacklist is None:
         client = try_build_redis_client(get_settings())
-        _token_blacklist = (
-            RedisTokenBlacklist(client)
-            if client is not None
-            else InMemoryTokenBlacklist()
-        )
+        _token_blacklist = RedisTokenBlacklist(client) if client is not None else InMemoryTokenBlacklist()
     return _token_blacklist
 
 

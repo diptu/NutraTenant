@@ -5,8 +5,6 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy.exc import IntegrityError
-
 from app.domain.exceptions import (
     ForbiddenError,
     ResourceAlreadyExistsError,
@@ -14,6 +12,7 @@ from app.domain.exceptions import (
 )
 from app.infrastructure.db.models.resource import Resource
 from app.infrastructure.db.repositories.resource_repo import ResourceRepository
+from sqlalchemy.exc import IntegrityError
 
 
 class ResourceService:
@@ -32,9 +31,7 @@ class ResourceService:
         created_by: uuid.UUID,
     ) -> Resource:
         if await self._resources.get_by_name(name) is not None:
-            raise ResourceAlreadyExistsError(
-                f"A resource named '{name}' already exists"
-            )
+            raise ResourceAlreadyExistsError(f"A resource named '{name}' already exists")
 
         now = datetime.now(UTC)
         resource = Resource(
@@ -53,9 +50,7 @@ class ResourceService:
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            raise ResourceAlreadyExistsError(
-                f"A resource named '{name}' already exists"
-            ) from exc
+            raise ResourceAlreadyExistsError(f"A resource named '{name}' already exists") from exc
 
         await self._session.commit()
         return resource
@@ -105,9 +100,7 @@ class ResourceService:
         await self._session.commit()
         return resource
 
-    async def delete(
-        self, resource_id: uuid.UUID, *, requester_id: uuid.UUID, is_superuser: bool
-    ) -> None:
+    async def delete(self, resource_id: uuid.UUID, *, requester_id: uuid.UUID, is_superuser: bool) -> None:
         resource = await self.get(resource_id)
         self._require_owner_or_superuser(resource, requester_id, is_superuser)
         await self._resources.delete(resource)

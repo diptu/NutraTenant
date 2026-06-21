@@ -19,10 +19,9 @@ from urllib.parse import urlencode
 
 import httpx
 import jwt
-from jwt.algorithms import RSAAlgorithm
-
 from app.core.config import Settings
 from app.domain.exceptions import GoogleTokenVerificationError
+from jwt.algorithms import RSAAlgorithm
 
 AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"  # noqa: S105 - endpoint URL, not a secret
@@ -75,15 +74,11 @@ class GoogleOIDCClient:
             )
         return response.json()
 
-    async def verify_id_token(
-        self, id_token: str, *, expected_nonce: str
-    ) -> GoogleIdentity:
+    async def verify_id_token(self, id_token: str, *, expected_nonce: str) -> GoogleIdentity:
         try:
             unverified_header = jwt.get_unverified_header(id_token)
         except jwt.PyJWTError as exc:
-            raise GoogleTokenVerificationError(
-                "Google ID token has a malformed header"
-            ) from exc
+            raise GoogleTokenVerificationError("Google ID token has a malformed header") from exc
 
         jwk = await self._find_jwk(unverified_header.get("kid"))
         public_key = RSAAlgorithm.from_jwk(json.dumps(jwk))
@@ -97,9 +92,7 @@ class GoogleOIDCClient:
                 issuer=list(_VALID_ISSUERS),
             )
         except jwt.PyJWTError as exc:
-            raise GoogleTokenVerificationError(
-                "Google ID token failed verification"
-            ) from exc
+            raise GoogleTokenVerificationError("Google ID token failed verification") from exc
 
         if claims.get("nonce") != expected_nonce:
             raise GoogleTokenVerificationError("Google ID token nonce does not match")
@@ -112,25 +105,18 @@ class GoogleOIDCClient:
                 name=claims.get("name"),
             )
         except KeyError as exc:
-            raise GoogleTokenVerificationError(
-                f"Google ID token missing claim: {exc}"
-            ) from exc
+            raise GoogleTokenVerificationError(f"Google ID token missing claim: {exc}") from exc
 
     async def _find_jwk(self, kid: str | None) -> dict[str, Any]:
         keys = await self._get_jwks()
         jwk = next((key for key in keys if key.get("kid") == kid), None)
         if jwk is None:
-            raise GoogleTokenVerificationError(
-                "No matching Google signing key for this ID token"
-            )
+            raise GoogleTokenVerificationError("No matching Google signing key for this ID token")
         return jwk
 
     async def _get_jwks(self) -> list[dict[str, Any]]:
         now = time.monotonic()
-        if (
-            self._jwks_cache["keys"] is None
-            or now - self._jwks_cache["fetched_at"] > _JWKS_CACHE_TTL_SECONDS
-        ):
+        if self._jwks_cache["keys"] is None or now - self._jwks_cache["fetched_at"] > _JWKS_CACHE_TTL_SECONDS:
             async with httpx.AsyncClient() as client:
                 response = await client.get(JWKS_URI)
             response.raise_for_status()

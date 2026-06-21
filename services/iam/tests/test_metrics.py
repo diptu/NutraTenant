@@ -21,10 +21,7 @@ class TestMetricsEndpoint:
 
         resp = await client.get("/metrics")
         body = resp.text
-        assert (
-            'iam_http_requests_total{method="GET",path="/health",status_code="200"}'
-            in body
-        )
+        assert 'iam_http_requests_total{method="GET",path="/health",status_code="200"}' in body
 
     async def test_metrics_excluded_from_openapi_schema(self, client) -> None:
         resp = await client.get("/openapi.json")

@@ -13,11 +13,10 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
-from redis.asyncio import Redis
-from redis.exceptions import RedisError
-
 from app.core.config import get_settings
 from app.core.redis_client import try_build_redis_client
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 logger = logging.getLogger(__name__)
 
@@ -29,18 +28,14 @@ class RateLimitResult:
 
 
 class RateLimiter(Protocol):
-    async def hit(
-        self, key: str, *, limit: int, window_seconds: int
-    ) -> RateLimitResult: ...
+    async def hit(self, key: str, *, limit: int, window_seconds: int) -> RateLimitResult: ...
 
 
 class InMemoryRateLimiter:
     def __init__(self) -> None:
         self._windows: dict[str, tuple[float, int]] = {}
 
-    async def hit(
-        self, key: str, *, limit: int, window_seconds: int
-    ) -> RateLimitResult:
+    async def hit(self, key: str, *, limit: int, window_seconds: int) -> RateLimitResult:
         now = time.monotonic()
         window_start, count = self._windows.get(key, (now, 0))
         if now - window_start >= window_seconds:
@@ -59,9 +54,7 @@ class RedisRateLimiter:
     def __init__(self, redis_client: Redis) -> None:
         self._redis = redis_client
 
-    async def hit(
-        self, key: str, *, limit: int, window_seconds: int
-    ) -> RateLimitResult:
+    async def hit(self, key: str, *, limit: int, window_seconds: int) -> RateLimitResult:
         full_key = f"ratelimit:{key}"
         try:
             count = await self._redis.incr(full_key)
@@ -74,9 +67,7 @@ class RedisRateLimiter:
             # first real command. Fail open rather than 500 the whole
             # login path — an outage in the rate limiter's own backend
             # must never block every login attempt.
-            logger.warning(
-                "Redis unreachable for rate limiting; allowing request", exc_info=True
-            )
+            logger.warning("Redis unreachable for rate limiting; allowing request", exc_info=True)
             return RateLimitResult(allowed=True)
 
         if count > limit:
@@ -92,9 +83,7 @@ def get_rate_limiter() -> RateLimiter:
     global _rate_limiter
     if _rate_limiter is None:
         client = try_build_redis_client(get_settings())
-        _rate_limiter = (
-            RedisRateLimiter(client) if client is not None else InMemoryRateLimiter()
-        )
+        _rate_limiter = RedisRateLimiter(client) if client is not None else InMemoryRateLimiter()
     return _rate_limiter
 
 

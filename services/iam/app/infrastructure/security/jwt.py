@@ -16,7 +16,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import jwt
-
 from app.core.config import Settings
 from app.domain.exceptions import InvalidTokenError
 
@@ -172,13 +171,9 @@ def decode_refresh_token(settings: Settings, token: str) -> RefreshTokenClaims:
         raise InvalidTokenError("Malformed refresh token claims") from exc
 
 
-def _decode(
-    settings: Settings, token: str, *, expected_type: TokenType
-) -> dict[str, Any]:
+def _decode(settings: Settings, token: str, *, expected_type: TokenType) -> dict[str, Any]:
     try:
-        payload = jwt.decode(
-            token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm]
-        )
+        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
     except jwt.PyJWTError as exc:
         raise InvalidTokenError(f"Invalid {expected_type} token") from exc
 
