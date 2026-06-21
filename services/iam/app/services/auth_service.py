@@ -32,7 +32,9 @@ from app.domain.exceptions import (
     RateLimitExceededError,
     RefreshTokenReusedError,
     RoleNotFoundError,
+    SessionNotFoundError,
     TenantSelectionRequiredError,
+    UsernameAlreadyExistsError,
     UserNotFoundError,
 )
 from app.domain.value_objects import Email
@@ -343,7 +345,15 @@ class AuthService:
     # -- admin provisioning --------------------------------------------------
 
     async def provision_user(
-        self, *, email: str, full_name: str | None, tenant_slug: str, role: str
+        self,
+        *,
+        email: str,
+        full_name: str | None,
+        tenant_slug: str,
+        role: str,
+        username: str | None = None,
+        phone: str | None = None,
+        attributes: dict | None = None,
     ) -> tuple[User, Organization, Role, str]:
         """Admin-provisions a user directly into a tenant — no invite round
         trip. The account is never left without a password (a temp one is
@@ -353,6 +363,11 @@ class AuthService:
         email provider wired up yet — same "not built yet" situation as
         every other token/credential delivery path in this service.
 
+        ``attributes`` (caller-supplied ABAC values, e.g. department/
+        designation) are merged over the organization's default_attributes
+        template — same precedence as OrganizationService.add_member: the
+        more specific, explicitly-given value wins over the tenant default.
+
         Returns ``(user, organization, role, temp_password)`` — the temp
         password is for the email stub/caller's own use, never echoed back
         over the API response itself.
@@ -360,6 +375,9 @@ class AuthService:
         normalized_email = Email(email).value
         if await self._users.get_by_email(normalized_email) is not None:
             raise EmailAlreadyExistsError(f"'{normalized_email}' is already registered")
+
+        if username is not None and await self._users.get_by_username(username) is not None:
+            raise UsernameAlreadyExistsError(f"Username '{username}' is already taken")
 
         organization = await self._orgs.get_by_slug(tenant_slug)
         if organization is None:
@@ -375,8 +393,10 @@ class AuthService:
             id=uuid.uuid4(),
             email=normalized_email,
             full_name=full_name,
+            username=username,
+            phone=phone,
             password_hash=hash_password(temp_password),
-            attributes=dict(organization.default_attributes or {}),
+            attributes={**(organization.default_attributes or {}), **(attributes or {})},
             is_active=True,
             is_verified=False,
             is_superuser=False,
@@ -390,6 +410,8 @@ class AuthService:
         try:
             await self._session.flush()
         except IntegrityError as exc:
+            if username is not None:
+                raise UsernameAlreadyExistsError(f"Username '{username}' is already taken") from exc
             raise EmailAlreadyExistsError(f"'{normalized_email}' is already registered") from exc
 
         membership = UserOrganizationRole(
@@ -634,6 +656,11 @@ class AuthService:
 
         user.failed_login_count = 0
         user.locked_until = None
+        # Only the brute-force lock auto-clears on a correct password —
+        # an admin-set SUSPENDED/INACTIVE/DELETED (PATCH .../status) must
+        # stay exactly as the admin left it.
+        if user.status == "LOCKED":
+            user.status = "ACTIVE"
         user.updated_at = datetime.now(UTC)
 
         if user.mfa_enabled:
@@ -977,6 +1004,9 @@ class AuthService:
                 settings.lockout_max_seconds,
             )
             user.locked_until = datetime.now(UTC) + timedelta(seconds=lock_seconds)
+            # Keep User.status (PATCH /users/{id}/status) in sync with the
+            # brute-force lockout — see UserService.set_status.
+            user.status = "LOCKED"
             await self._audit(
                 event_type="auth.login.locked",
                 user_id=user.id,
@@ -1162,6 +1192,34 @@ class AuthService:
                     1,
                 )
                 await self._token_blacklist.add_jti(str(access_claims.jti), ttl_seconds=ttl_seconds)
+
+    # -- session management -----------------------------------------------
+
+    async def list_sessions(self, user_id: uuid.UUID) -> list[RefreshToken]:
+        """Each row in `refresh_tokens` *is* a session record (see
+        RefreshToken) — active means not revoked and not yet expired."""
+        tokens = await self._refresh_tokens.list_active_for_user(user_id)
+        now = datetime.now(UTC)
+        return [token for token in tokens if _aware(token.expires_at) > now]
+
+    async def revoke_session(self, user_id: uuid.UUID, session_id: uuid.UUID) -> None:
+        """Revokes one session (DELETE /users/{user_id}/sessions/{session_id})
+        without touching the rest of its rotation family's *history* — unlike
+        logout/revoke_all_for_user, this targets exactly one still-active
+        refresh token. Same 404 regardless of *why* it doesn't match (wrong
+        user, already revoked, expired, or doesn't exist) — no signal leaked
+        either way."""
+        token = await self._refresh_tokens.get_by_id(session_id)
+        if (
+            token is None
+            or token.user_id != user_id
+            or token.revoked_at is not None
+            or _aware(token.expires_at) <= datetime.now(UTC)
+        ):
+            raise SessionNotFoundError(f"No active session '{session_id}' for this user")
+        token.revoked_at = datetime.now(UTC)
+        await self._audit(event_type="auth.session.revoked", user_id=user_id, context={})
+        await self._session.commit()
 
     # -- password management ---------------------------------------------------
 

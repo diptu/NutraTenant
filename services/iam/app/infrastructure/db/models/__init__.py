@@ -1,8 +1,10 @@
 """Import every model so they register on Base.metadata (Alembic + test schema creation)."""
 
 from app.infrastructure.db.models.associations import (
+    OrganizationTenant,
     RolePermission,
     UserOrganizationRole,
+    UserPermissionGrant,
 )
 from app.infrastructure.db.models.audit_log import AuditLog
 from app.infrastructure.db.models.organization import Organization
@@ -16,6 +18,7 @@ from app.infrastructure.db.models.policy_evaluation_log import PolicyEvaluationL
 from app.infrastructure.db.models.refresh_token import RefreshToken
 from app.infrastructure.db.models.resource import Resource
 from app.infrastructure.db.models.role import Role
+from app.infrastructure.db.models.tenant import Tenant
 from app.infrastructure.db.models.user import User
 from app.infrastructure.db.models.user_role import UserRole
 
@@ -23,6 +26,7 @@ __all__ = [
     "AuditLog",
     "Organization",
     "OrganizationInvitation",
+    "OrganizationTenant",
     "PasswordResetToken",
     "Permission",
     "Policy",
@@ -31,7 +35,9 @@ __all__ = [
     "Resource",
     "Role",
     "RolePermission",
+    "Tenant",
     "User",
     "UserOrganizationRole",
+    "UserPermissionGrant",
     "UserRole",
 ]

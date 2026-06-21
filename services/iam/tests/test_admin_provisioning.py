@@ -182,3 +182,13 @@ class TestAdminCreateUser:
         user = result.scalar_one()
         assert user.must_change_password is True
         assert user.password_hash is not None  # never left without a password
+
+    @pytest.mark.anyio
+    async def test_endpoint_is_marked_deprecated_in_openapi(self, client):
+        """Superseded by POST /api/v1/users (Common User Object response) —
+        kept working for existing callers, but flagged so new integrations
+        don't build against it."""
+        response = await client.get("/openapi.json")
+        assert response.status_code == 200
+        op = response.json()["paths"]["/api/v1/admin/users"]["post"]
+        assert op.get("deprecated") is True

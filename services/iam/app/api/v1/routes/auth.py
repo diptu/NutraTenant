@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from app.api.v1.dependencies import (
     get_auth_service,
     get_current_user,
@@ -41,6 +39,7 @@ from app.infrastructure.db.models.user import User
 from app.infrastructure.security.device import describe_device
 from app.services.auth_service import AuthService, LoginResult
 from app.services.google_oauth_service import GoogleOAuthService
+from app.services.user_service import account_status, display_username
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -66,18 +65,6 @@ def _set_refresh_cookie(response: Response, refresh_token: str, settings: Settin
 
 def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(key=_REFRESH_COOKIE_NAME, path=_REFRESH_COOKIE_PATH)
-
-
-def _account_status(user: User) -> str:
-    # SQLite (tests only) round-trips `locked_until` tz-naive; Postgres
-    # round-trips tz-aware — normalize before comparing, same as
-    # AuthService._aware.
-    locked_until = user.locked_until
-    if locked_until is not None and locked_until.tzinfo is None:
-        locked_until = locked_until.replace(tzinfo=UTC)
-    if locked_until is not None and locked_until > datetime.now(UTC):
-        return "LOCKED"
-    return "ACTIVE" if user.is_active else "INACTIVE"
 
 
 def _build_token_response(
@@ -123,7 +110,7 @@ def _build_token_response(
             id=user.id,
             name=user.full_name,
             email=user.email,
-            username=user.email.split("@", 1)[0],
+            username=display_username(user),
             tenant=tenant,
             role=role,
             department=user.attributes.get("department"),
@@ -131,7 +118,7 @@ def _build_token_response(
             permissions=result.permissions,
             attributes={
                 **user.attributes,
-                "account_status": _account_status(user),
+                "account_status": account_status(user),
                 "uses_mfa": user.mfa_enabled,
             },
         ),
