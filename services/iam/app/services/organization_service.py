@@ -40,6 +40,9 @@ from app.infrastructure.db.repositories.organization_invitation_repo import (
     OrganizationInvitationRepository,
 )
 from app.infrastructure.db.repositories.organization_repo import OrganizationRepository
+from app.infrastructure.db.repositories.organization_tenant_repo import (
+    OrganizationTenantRepository,
+)
 from app.infrastructure.db.repositories.role_repo import RoleRepository
 from app.infrastructure.db.repositories.user_repo import UserRepository
 from app.infrastructure.security.invitation_token import (
@@ -76,6 +79,7 @@ class OrganizationService:
         self._users = UserRepository(session)
         self._invitations = OrganizationInvitationRepository(session)
         self._audit_log = AuditLogRepository(session)
+        self._org_tenants = OrganizationTenantRepository(session)
 
     # -- lifecycle -------------------------------------------------------
 
@@ -172,6 +176,11 @@ class OrganizationService:
         # those rows.
         for membership in await self._orgs.list_members(organization_id):
             await self._orgs.remove_membership(membership)
+        # Same reasoning for the Tenant many-to-many link (see
+        # app.services.tenant_service) — OrganizationTenant.organization_id
+        # is a NOT NULL FK with no delete-orphan cascade configured either.
+        for link in await self._org_tenants.list_for_organization(organization_id):
+            await self._org_tenants.remove_link(link)
         await self._orgs.delete(org)
         await self._session.commit()
 

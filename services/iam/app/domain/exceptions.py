@@ -20,8 +20,20 @@ class EmailAlreadyExistsError(AlreadyExistsError):
     """Registration attempted with an email already in use."""
 
 
+class UsernameAlreadyExistsError(AlreadyExistsError):
+    """A user create/update attempted with a username already in use."""
+
+
 class OrganizationAlreadyExistsError(AlreadyExistsError):
     """An organization with this slug already exists."""
+
+
+class TenantAlreadyExistsError(AlreadyExistsError):
+    """A tenant with this slug already exists."""
+
+
+class OrganizationTenantLinkAlreadyExistsError(AlreadyExistsError):
+    """This organization is already linked to this tenant."""
 
 
 class UserAlreadyMemberError(AlreadyExistsError):
@@ -93,12 +105,27 @@ class TenantSelectionRequiredError(DomainError):
         super().__init__("Multiple tenants available for this account; specify tenant_id to continue")
 
 
+class TenantContextRequiredError(DomainError):
+    """A direct user-permission grant (POST/DELETE /users/{id}/permissions)
+    was attempted without a ``tenant_id`` query param, and the target user's
+    organization memberships don't disambiguate which one to scope it to
+    (they belong to zero, or more than one) — 400."""
+
+
 class UserNotFoundError(DomainError):
     pass
 
 
 class OrganizationNotFoundError(DomainError):
     pass
+
+
+class TenantNotFoundError(DomainError):
+    pass
+
+
+class OrganizationTenantLinkNotFoundError(DomainError):
+    """This organization is not currently linked to this tenant."""
 
 
 class RoleNotFoundError(DomainError):
@@ -119,6 +146,12 @@ class PolicyNotFoundError(DomainError):
 
 class InvitationNotFoundError(DomainError):
     pass
+
+
+class SessionNotFoundError(DomainError):
+    """No active session with this id belongs to this user — covers
+    unknown/malformed session ids, someone else's session, and an already
+    revoked/expired one alike (no signal is leaked about which)."""
 
 
 class MfaNotEnabledError(DomainError):

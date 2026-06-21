@@ -8,6 +8,7 @@ from app.api.v1.routes import (
     policies,
     resources,
     roles,
+    tenant_groups,
     tenants,
     users,
 )
@@ -26,12 +27,15 @@ from app.domain.exceptions import (
     InvalidTokenError,
     InvitationNotFoundError,
     OrganizationNotFoundError,
+    OrganizationTenantLinkNotFoundError,
     PermissionNotFoundError,
     PolicyNotFoundError,
     RateLimitExceededError,
     ResourceNotFoundError,
     RoleNotAssignedError,
     RoleNotFoundError,
+    SessionNotFoundError,
+    TenantNotFoundError,
     TenantSelectionRequiredError,
     UserNotFoundError,
 )
@@ -48,6 +52,9 @@ _NOT_FOUND_ERRORS = (
     PolicyNotFoundError,
     RoleNotAssignedError,
     InvitationNotFoundError,
+    TenantNotFoundError,
+    OrganizationTenantLinkNotFoundError,
+    SessionNotFoundError,
 )
 _UNAUTHORIZED_ERRORS = (
     InvalidCredentialsError,
@@ -131,6 +138,7 @@ def create_app() -> FastAPI:
     app.include_router(resources.router, prefix="/api/v1")
     app.include_router(policies.router, prefix="/api/v1")
     app.include_router(tenants.router, prefix="/api/v1")
+    app.include_router(tenant_groups.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
 
     return app

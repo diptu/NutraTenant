@@ -23,6 +23,7 @@ from app.services.policy_engine_service import PolicyEngineService
 from app.services.policy_service import PolicyService
 from app.services.resource_service import ResourceService
 from app.services.role_service import RoleService
+from app.services.tenant_service import TenantService
 from app.services.user_service import UserService
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -42,6 +43,7 @@ __all__ = [
     "get_resource_service",
     "get_role_service",
     "get_state_store",
+    "get_tenant_service",
     "get_token_cache",
     "get_user_service",
     "require_global_role",
@@ -212,3 +214,7 @@ def get_policy_engine_service(
     session: AsyncSession = Depends(get_async_db),
 ) -> PolicyEngineService:
     return PolicyEngineService(session)
+
+
+def get_tenant_service(session: AsyncSession = Depends(get_async_db)) -> TenantService:
+    return TenantService(session)

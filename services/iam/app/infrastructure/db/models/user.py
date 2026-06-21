@@ -27,6 +27,16 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Optional profile fields (migration 0014) — surfaced on GET /users/me.
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # A real, independently-settable handle (migration 0016) — distinct from
+    # email's local part, which is still the fallback wherever `username` is
+    # rendered for an account that's never set one (see
+    # app.services.user_service / app.api.v1.routes.auth).
+    username: Mapped[str | None] = mapped_column(String(50), unique=True, nullable=True)
+
     # Legacy generic OAuth columns (migration 0001) — kept for back-compat,
     # not written to by the Google-specific flow below.
     oauth_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -41,6 +51,14 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_superuser: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # Admin-settable lifecycle label (migration 0017) — backs PATCH
+    # /users/{id}/status. The single source of truth for display
+    # (account_status() just returns it); UserService.set_status is the one
+    # place that keeps it and `is_active`/`locked_until` in lockstep, so
+    # every other access-gating check in this codebase (get_current_user,
+    # AuthService) keeps working unmodified off of `is_active` alone.
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="ACTIVE", server_default="ACTIVE")
 
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

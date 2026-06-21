@@ -25,6 +25,7 @@ dev = [
     "anyio>=4.14.0",
     "mypy>=2.1.0",
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "pytest-mock>=3.15.1",
     "respx>=0.23.1",
     "ruff>=0.15.18",
@@ -33,6 +34,20 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "--cov=app --cov-report=term-missing --cov-report=html"
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
 
 [tool.mypy]
 exclude = ["^alembic/"]

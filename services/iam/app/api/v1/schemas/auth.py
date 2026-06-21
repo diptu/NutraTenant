@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from app.api.v1.schemas.user import UserOut
+from app.api.v1.schemas.user import RoleOut, TenantOut, UserOut
 from pydantic import BaseModel, EmailStr, Field
 
 __all__ = [
@@ -61,17 +61,6 @@ class RefreshRequest(BaseModel):
     refresh_token: str | None = None
 
 
-class TenantOut(BaseModel):
-    id: str
-    tenant_id: str
-    name: str
-
-
-class RoleOut(BaseModel):
-    id: str
-    name: str
-
-
 class SessionOut(BaseModel):
     session_id: str
     issued_at: datetime
@@ -85,8 +74,8 @@ class LoginUserOut(BaseModel):
     id: uuid.UUID
     name: str | None
     email: str
-    # Derived from the email's local part — there is no separate `username`
-    # column on `User`, this just satisfies clients that expect the field.
+    # The real `username` column when set, else derived from the email's
+    # local part — see app.services.user_service.display_username.
     username: str
     tenant: TenantOut | None
     role: RoleOut | None

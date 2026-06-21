@@ -13,7 +13,11 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
-    from app.infrastructure.db.models.associations import UserOrganizationRole
+    from app.infrastructure.db.models.associations import (
+        OrganizationTenant,
+        UserOrganizationRole,
+    )
+    from app.infrastructure.db.models.tenant import Tenant
 
 
 class Organization(Base):
@@ -54,3 +58,16 @@ class Organization(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     members: Mapped[list[UserOrganizationRole]] = relationship(back_populates="organization", lazy="raise")
+
+    # The many-to-many link to Tenant (see app.infrastructure.db.models.tenant
+    # for why this is a separate concept from the `tenant_id` claim/slug
+    # used elsewhere in this codebase).
+    organization_tenants: Mapped[list[OrganizationTenant]] = relationship(
+        back_populates="organization", lazy="raise"
+    )
+
+    @property
+    def tenants(self) -> list[Tenant]:
+        """Flattened view of organization_tenants — requires it to already
+        be eager-loaded (it's `lazy="raise"`, same convention as Role.permissions)."""
+        return [ot.tenant for ot in self.organization_tenants]

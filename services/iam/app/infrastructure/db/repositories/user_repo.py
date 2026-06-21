@@ -28,9 +28,35 @@ class UserRepository(BaseRepository[User]):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_username(self, username: str) -> User | None:
+        stmt = select(User).where(User.username == username)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def search(self, query: str, *, limit: int = 50) -> list[User]:
         pattern = f"%{query.lower()}%"
         stmt = select(User).where(or_(User.email.ilike(pattern), User.full_name.ilike(pattern))).limit(limit)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_for_organization(
+        self,
+        organization_id: uuid.UUID,
+        query: str | None = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[User]:
+        """Users who are members of `organization_id` — the tenant-scoped
+        counterpart to `search`, for an org admin/owner listing only their
+        own tenant's users rather than every user platform-wide."""
+        stmt = select(User).join(UserOrganizationRole, UserOrganizationRole.user_id == User.id).where(
+            UserOrganizationRole.organization_id == organization_id
+        )
+        if query:
+            pattern = f"%{query.lower()}%"
+            stmt = stmt.where(or_(User.email.ilike(pattern), User.full_name.ilike(pattern)))
+        stmt = stmt.limit(limit).offset(offset)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 

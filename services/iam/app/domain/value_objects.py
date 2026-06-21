@@ -5,10 +5,16 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _MAX_ATTRIBUTE_BYTES = 8 * 1024  # keeps the JSONB column small and the JWT it can feed cheap
+
+# User.status (migration 0017) — the admin-settable account lifecycle label
+# backing PATCH /users/{id}/status. Shared by the API schema (request/
+# response validation) and the service layer (UserService.set_status),
+# hence living here rather than in either of those modules.
+UserStatus = Literal["ACTIVE", "INACTIVE", "SUSPENDED", "LOCKED", "PENDING_VERIFICATION", "DELETED"]
 
 
 @dataclass(frozen=True, slots=True)

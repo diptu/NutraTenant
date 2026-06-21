@@ -128,6 +128,23 @@ fi
 request POST "/roles" "$SU_TOKEN" "{\"name\":\"Moderator\",\"code\":\"moderator\",\"organization_id\":\"${APPLE_ORG_ID}\"}" "201" "create the org-scoped 'moderator' role"
 
 # ---------------------------------------------------------------------------
+section "Tenant Group — Apple Holdings (Organization<->Tenant many-to-many demo)"
+# ---------------------------------------------------------------------------
+
+# Distinct from the "Apple Corp" tenant_id/org above: this is the new,
+# separate Tenant entity an Organization can belong to several of — see
+# app/services/tenant_service.py. Best-effort: on a repeat run against an
+# already-seeded apple-corp, this 409s and the link step below is skipped.
+request POST "/tenant-groups" "$SU_TOKEN" '{"name":"Apple Holdings","slug":"apple-holdings"}' "201" "superuser creates the Apple Holdings tenant group"
+APPLE_TENANT_GROUP_ID="$(jf '.id')"
+
+if [[ -n "$APPLE_TENANT_GROUP_ID" && "$APPLE_TENANT_GROUP_ID" != "null" ]]; then
+  request POST "/tenant-groups/${APPLE_TENANT_GROUP_ID}/organizations" "$SU_TOKEN" "{\"organization_id\":\"${APPLE_ORG_ID}\"}" "201" "link the apple-corp org into Apple Holdings"
+else
+  note "Tenant group 'apple-holdings' already exists (or creation failed) — skipping the organization link."
+fi
+
+# ---------------------------------------------------------------------------
 section "Staff"
 # ---------------------------------------------------------------------------
 

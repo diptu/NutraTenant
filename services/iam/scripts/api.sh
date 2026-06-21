@@ -179,6 +179,17 @@ request POST "/organizations/${ORG_ID}/members" "$SU_TOKEN" "{\"user_id\":\"${AL
 
 request PATCH "/organizations/${ORG_ID}" "$SU_TOKEN" '{"default_attributes":{"region":"EU"}}' "200" "superuser updates org default attributes"
 
+# POST /users — Common User Object response, distinct from POST /admin/users'
+# narrower {user_id, status, temp_password_sent} contract (section 5 below).
+# No password in the body: a temp one is generated server-side, same flow.
+JANE_EMAIL="jane-${RUN_ID}@example.com"
+request POST "/users" "$SU_TOKEN" "{\"name\":\"Jane Smith\",\"email\":\"${JANE_EMAIL}\",\"username\":\"janesmith-${RUN_ID}\",\"phone\":\"+8801711122233\",\"tenant_id\":\"${ORG_SLUG}\",\"role\":\"MEMBER\",\"attributes\":{\"department\":\"Engineering\",\"designation\":\"Developer\",\"location\":\"Dhaka\"}}" "201" "superuser creates jane directly into the org via POST /users"
+JANE_ID="$(jf '.id')"
+
+request POST "/users" "$SU_TOKEN" "{\"name\":\"Dup\",\"email\":\"${JANE_EMAIL}\",\"tenant_id\":\"${ORG_SLUG}\",\"role\":\"MEMBER\"}" "409" "creating a second user with jane's email is rejected"
+
+request GET "/users/${JANE_ID}" "$SU_TOKEN" "" "200" "superuser reads jane back — same Common User Object shape as GET /users/me"
+
 request POST "/organizations/${ORG_ID}/invitations" "$SU_TOKEN" "{\"email\":\"${BOB_EMAIL}\",\"role_code\":\"member\"}" "201" "superuser invites bob into the org"
 ORG_INVITE_TOKEN="$(jf '.invitation_token')"
 
@@ -333,6 +344,36 @@ fi
 request GET "/auth/google/login" "" "" "200" "fetch the Google OAuth consent URL (callback requires a real browser flow — not exercised here)"
 
 request POST "/auth/logout" "$ALICE_TOKEN" "" "204" "alice logs out" --cookies
+
+# ---------------------------------------------------------------------------
+section "10. TENANT GROUPS (Organization<->Tenant many-to-many — superuser-only, distinct from section 4's /tenants bootstrap API)"
+# ---------------------------------------------------------------------------
+
+TENANT_GROUP_SLUG="tenant-group-${RUN_ID}"
+
+request POST "/tenant-groups" "$SU_TOKEN" "{\"name\":\"Acme Holding\",\"slug\":\"${TENANT_GROUP_SLUG}\"}" "201" "superuser creates a tenant group"
+TENANT_GROUP_ID="$(jf '.id')"
+
+request GET "/tenant-groups" "$SU_TOKEN" "" "200" "superuser lists tenant groups"
+
+request GET "/tenant-groups/${TENANT_GROUP_ID}" "$SU_TOKEN" "" "200" "superuser reads the tenant group"
+
+request PATCH "/tenant-groups/${TENANT_GROUP_ID}" "$SU_TOKEN" '{"name":"Acme Holding Co"}' "200" "superuser renames the tenant group"
+
+# Re-links the "acme" organization created in section 3 — an organization
+# can belong to several tenant groups, and a tenant group can hold several
+# organizations.
+request POST "/tenant-groups/${TENANT_GROUP_ID}/organizations" "$SU_TOKEN" "{\"organization_id\":\"${ORG_ID}\"}" "201" "superuser links the acme org into the tenant group"
+
+request GET "/tenant-groups/${TENANT_GROUP_ID}/organizations" "$SU_TOKEN" "" "200" "list organizations linked to the tenant group"
+
+request GET "/tenant-groups/by-organization/${ORG_ID}" "$SU_TOKEN" "" "200" "list tenant groups the acme org belongs to"
+
+request POST "/tenant-groups/${TENANT_GROUP_ID}/organizations" "$SU_TOKEN" "{\"organization_id\":\"${ORG_ID}\"}" "409" "linking the same org twice is rejected"
+
+request DELETE "/tenant-groups/${TENANT_GROUP_ID}/organizations/${ORG_ID}" "$SU_TOKEN" "" "204" "superuser unlinks the acme org"
+
+request DELETE "/tenant-groups/${TENANT_GROUP_ID}" "$SU_TOKEN" "" "204" "superuser deletes the tenant group (cleanup)"
 
 # ---------------------------------------------------------------------------
 section "Summary"
