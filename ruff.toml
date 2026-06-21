@@ -1,0 +1,20 @@
+target-version = "py311"
+line-length = 110
+
+extend-exclude = [
+    "**/.venv",
+    "**/alembic/versions",
+    "**/__pycache__",
+    "**/migrations",
+    "build",
+    "dist",
+    "node_modules",
+]
+
+[lint]
+# E/W = pycodestyle (PEP 8), F = pyflakes, I = import sorting (replaces isort).
+select = ["E", "W", "F", "I"]
+
+[format]
+quote-style = "double"
+line-ending = "lf"

@@ -1,16 +1,14 @@
 """FastAPI application factory."""
 
-from fastapi import FastAPI, Request, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
-
 from app.api.v1.routes import (
+    admin,
     auth,
     organizations,
     permissions,
     policies,
     resources,
     roles,
+    tenants,
     users,
 )
 from app.core.config import get_settings
@@ -24,6 +22,7 @@ from app.domain.exceptions import (
     DomainError,
     ForbiddenError,
     InvalidCredentialsError,
+    InvalidMfaCodeError,
     InvalidTokenError,
     InvitationNotFoundError,
     OrganizationNotFoundError,
@@ -33,8 +32,12 @@ from app.domain.exceptions import (
     ResourceNotFoundError,
     RoleNotAssignedError,
     RoleNotFoundError,
+    TenantSelectionRequiredError,
     UserNotFoundError,
 )
+from fastapi import FastAPI, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 _NOT_FOUND_ERRORS = (
     UserNotFoundError,
@@ -46,7 +49,11 @@ _NOT_FOUND_ERRORS = (
     RoleNotAssignedError,
     InvitationNotFoundError,
 )
-_UNAUTHORIZED_ERRORS = (InvalidCredentialsError, InvalidTokenError)
+_UNAUTHORIZED_ERRORS = (
+    InvalidCredentialsError,
+    InvalidTokenError,
+    InvalidMfaCodeError,
+)
 
 
 async def _domain_error_handler(_: Request, exc: Exception) -> JSONResponse:
@@ -69,6 +76,11 @@ async def _domain_error_handler(_: Request, exc: Exception) -> JSONResponse:
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"detail": str(exc)},
             headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
+    if isinstance(exc, TenantSelectionRequiredError):
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": str(exc), "organizations": exc.organizations},
         )
     if isinstance(exc, _UNAUTHORIZED_ERRORS):
         status_code = status.HTTP_401_UNAUTHORIZED
@@ -118,6 +130,8 @@ def create_app() -> FastAPI:
     app.include_router(permissions.router, prefix="/api/v1")
     app.include_router(resources.router, prefix="/api/v1")
     app.include_router(policies.router, prefix="/api/v1")
+    app.include_router(tenants.router, prefix="/api/v1")
+    app.include_router(admin.router, prefix="/api/v1")
 
     return app
 

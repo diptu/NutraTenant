@@ -8,9 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_MAX_ATTRIBUTE_BYTES = (
-    8 * 1024
-)  # keeps the JSONB column small and the JWT it can feed cheap
+_MAX_ATTRIBUTE_BYTES = 8 * 1024  # keeps the JSONB column small and the JWT it can feed cheap
 
 
 @dataclass(frozen=True, slots=True)

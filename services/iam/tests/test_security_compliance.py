@@ -15,10 +15,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from fastapi import Depends, FastAPI
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
-
 from app.core.config import get_settings
 from app.core.rate_limit import (
     InMemoryRateLimiter,
@@ -32,6 +28,9 @@ from app.core.token_blacklist import (
 )
 from app.infrastructure.db.models.audit_log import AuditLog
 from app.infrastructure.db.models.user import User
+from fastapi import Depends, FastAPI
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 _PASSWORD = "StrongPassw0rd!"
 
@@ -68,26 +67,20 @@ def _auth(token: str) -> dict:
 
 
 async def _register(client, email: str, password: str = _PASSWORD) -> dict:
-    resp = await client.post(
-        "/api/v1/auth/register", json={"email": email, "password": password}
-    )
+    resp = await client.post("/api/v1/auth/register", json={"email": email, "password": password})
     assert resp.status_code == 201, resp.text
     return resp.json()
 
 
 async def _login(client, email: str, password: str = _PASSWORD):
-    return await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": password}
-    )
+    return await client.post("/api/v1/auth/login", json={"email": email, "password": password})
 
 
 async def _me(client, access_token: str):
     return await client.get("/api/v1/users/me", headers=_auth(access_token))
 
 
-def _build_bare_protected_app(
-    *, token_blacklist_override, async_db_override
-) -> FastAPI:
+def _build_bare_protected_app(*, token_blacklist_override, async_db_override) -> FastAPI:
     """Exercises get_current_user (the production dependency, which already
     checks the token blacklist) directly, without JWTContextMiddleware —
     mirrors the legacy intent of testing "the non-middleware-cached decode
@@ -154,9 +147,7 @@ class TestRateLimiterUnit:
         assert not (await limiter.hit("a", limit=2, window_seconds=60)).allowed
         assert (await limiter.hit("b", limit=2, window_seconds=60)).allowed
 
-    async def test_redis_construction_failure_falls_back_to_in_memory(
-        self, monkeypatch
-    ) -> None:
+    async def test_redis_construction_failure_falls_back_to_in_memory(self, monkeypatch) -> None:
         monkeypatch.setattr(get_settings(), "redis_url", "not a valid redis url")
         assert isinstance(get_rate_limiter(), InMemoryRateLimiter)
 
@@ -172,9 +163,7 @@ class TestRateLimiterUnit:
 
 @pytest.mark.anyio
 class TestLoginRateLimitIntegration:
-    async def test_exhaustion_returns_429_with_retry_after_and_audit(
-        self, client, db_session
-    ) -> None:
+    async def test_exhaustion_returns_429_with_retry_after_and_audit(self, client, db_session) -> None:
         settings = get_settings()
         email = "ratelimit-exhaustion@example.com"
 
@@ -189,9 +178,7 @@ class TestLoginRateLimitIntegration:
         logs = (
             (
                 await db_session.execute(
-                    select(AuditLog).where(
-                        AuditLog.event_type == "auth.login.rate_limited"
-                    )
+                    select(AuditLog).where(AuditLog.event_type == "auth.login.rate_limited")
                 )
             )
             .scalars()
@@ -221,9 +208,7 @@ class TestLoginRateLimitIntegration:
 
 @pytest.mark.anyio
 class TestAccountLockout:
-    async def test_successful_login_resets_failed_count(
-        self, client, db_session
-    ) -> None:
+    async def test_successful_login_resets_failed_count(self, client, db_session) -> None:
         email = "lockout-reset@example.com"
         await _register(client, email)
         await _login(client, email, "wrong")
@@ -258,9 +243,7 @@ class TestAccessTokenBlacklist:
         login_resp = await _login(client, email)
         tokens = login_resp.json()
 
-        logout_resp = await client.post(
-            "/api/v1/auth/logout", headers=_auth(tokens["access_token"])
-        )
+        logout_resp = await client.post("/api/v1/auth/logout", headers=_auth(tokens["access_token"]))
         assert logout_resp.status_code == 204
 
         assert (await _me(client, tokens["access_token"])).status_code == 401
@@ -271,16 +254,12 @@ class TestAccessTokenBlacklist:
         session_a = (await _login(client, email)).json()
         session_b = (await _login(client, email)).json()
 
-        await client.post(
-            "/api/v1/auth/logout", headers=_auth(session_a["access_token"])
-        )
+        await client.post("/api/v1/auth/logout", headers=_auth(session_a["access_token"]))
 
         resp = await _me(client, session_b["access_token"])
         assert resp.status_code == 200
 
-    async def test_logout_without_authorization_header_still_revokes_refresh(
-        self, client
-    ) -> None:
+    async def test_logout_without_authorization_header_still_revokes_refresh(self, client) -> None:
         """No access token presented (e.g. client only kept the refresh
         cookie) must not block the refresh-token revocation."""
         email = "blacklist-no-header@example.com"
@@ -318,9 +297,7 @@ class TestAccessTokenBlacklist:
         new_token = new_login.json()["access_token"]
         assert (await _me(client, new_token)).status_code == 200
 
-    async def test_password_reset_invalidates_prior_access_token(
-        self, client, monkeypatch
-    ) -> None:
+    async def test_password_reset_invalidates_prior_access_token(self, client, monkeypatch) -> None:
         from app.core.config import get_settings as _get_settings
 
         monkeypatch.setenv("DEBUG", "true")
@@ -330,9 +307,7 @@ class TestAccessTokenBlacklist:
         await _register(client, email)
         old_token = (await _login(client, email)).json()["access_token"]
 
-        forgot_resp = await client.post(
-            "/api/v1/auth/forgot-password", json={"email": email}
-        )
+        forgot_resp = await client.post("/api/v1/auth/forgot-password", json={"email": email})
         assert forgot_resp.status_code == 200
         raw_token = forgot_resp.json()["reset_token"]
         assert raw_token is not None
@@ -366,17 +341,13 @@ class TestAccessTokenBlacklist:
             async_db_override=app.dependency_overrides[get_async_db],
         )
         transport = ASGITransport(app=bare_app)
-        async with AsyncClient(
-            transport=transport, base_url="https://test"
-        ) as bare_client:
+        async with AsyncClient(transport=transport, base_url="https://test") as bare_client:
             ok = await bare_client.get("/protected", headers=_auth(token))
             assert ok.status_code == 200
 
         await client.post("/api/v1/auth/logout", headers=_auth(token))
 
-        async with AsyncClient(
-            transport=transport, base_url="https://test"
-        ) as bare_client:
+        async with AsyncClient(transport=transport, base_url="https://test") as bare_client:
             blocked = await bare_client.get("/protected", headers=_auth(token))
             assert blocked.status_code == 401
 
@@ -391,9 +362,7 @@ class TestTokenBlacklistUnit:
     async def test_jti_round_trip_and_expiry(self, monkeypatch) -> None:
         blacklist = InMemoryTokenBlacklist()
         clock = {"t": 0.0}
-        monkeypatch.setattr(
-            "app.core.token_blacklist.time.monotonic", lambda: clock["t"]
-        )
+        monkeypatch.setattr("app.core.token_blacklist.time.monotonic", lambda: clock["t"])
 
         await blacklist.add_jti("abc", ttl_seconds=10)
         assert await blacklist.contains_jti("abc") is True
@@ -403,18 +372,14 @@ class TestTokenBlacklistUnit:
     async def test_invalidate_before_round_trip_and_expiry(self, monkeypatch) -> None:
         blacklist = InMemoryTokenBlacklist()
         clock = {"t": 0.0}
-        monkeypatch.setattr(
-            "app.core.token_blacklist.time.monotonic", lambda: clock["t"]
-        )
+        monkeypatch.setattr("app.core.token_blacklist.time.monotonic", lambda: clock["t"])
 
         await blacklist.set_invalidate_before("user-1", timestamp=100.0, ttl_seconds=10)
         assert await blacklist.get_invalidate_before("user-1") == 100.0
         clock["t"] = 11.0
         assert await blacklist.get_invalidate_before("user-1") is None
 
-    async def test_redis_construction_failure_falls_back_to_in_memory(
-        self, monkeypatch
-    ) -> None:
+    async def test_redis_construction_failure_falls_back_to_in_memory(self, monkeypatch) -> None:
         monkeypatch.setattr(get_settings(), "redis_url", "not a valid redis url")
         assert isinstance(get_token_blacklist(), InMemoryTokenBlacklist)
 
@@ -441,16 +406,12 @@ class TestSecurityHeaders:
         assert resp.status_code == 404
         assert resp.headers.get("X-Content-Type-Options") == "nosniff"
 
-    async def test_hsts_present_when_cookie_secure_true(
-        self, client, monkeypatch
-    ) -> None:
+    async def test_hsts_present_when_cookie_secure_true(self, client, monkeypatch) -> None:
         monkeypatch.setattr(get_settings(), "cookie_secure", True)
         resp = await client.get("/health")
         assert "Strict-Transport-Security" in resp.headers
 
-    async def test_hsts_absent_when_cookie_secure_false(
-        self, client, monkeypatch
-    ) -> None:
+    async def test_hsts_absent_when_cookie_secure_false(self, client, monkeypatch) -> None:
         monkeypatch.setattr(get_settings(), "cookie_secure", False)
         resp = await client.get("/health")
         assert "Strict-Transport-Security" not in resp.headers
@@ -480,7 +441,4 @@ class TestCors:
                 "Access-Control-Request-Method": "POST",
             },
         )
-        assert (
-            resp.headers.get("access-control-allow-origin")
-            != "https://evil.example.com"
-        )
+        assert resp.headers.get("access-control-allow-origin") != "https://evil.example.com"

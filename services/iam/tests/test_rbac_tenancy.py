@@ -19,9 +19,8 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
-
 from app.infrastructure.db.models.user import User
+from sqlalchemy import select
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -33,46 +32,46 @@ def _auth(token: str) -> dict:
 
 
 async def _register(client, email: str, password: str = "Password123!") -> dict:
-    resp = await client.post(
-        "/api/v1/auth/register", json={"email": email, "password": password}
-    )
+    resp = await client.post("/api/v1/auth/register", json={"email": email, "password": password})
     assert resp.status_code == 201, resp.text
     return resp.json()
 
 
 async def _login_token(client, email: str, password: str = "Password123!") -> str:
-    resp = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": password}
-    )
+    resp = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
 
 
-async def _make_superuser(db_session, user_id: UUID | str) -> None:
+async def _set_superuser(db_session, user_id: UUID | str, value: bool) -> None:
     result = await db_session.execute(select(User).where(User.id == UUID(str(user_id))))
     user = result.scalar_one()
-    user.is_superuser = True
+    user.is_superuser = value
     db_session.add(user)
     await db_session.commit()
 
 
-async def _create_org(client, token: str, *, name: str = "Acme Inc", slug: str) -> dict:
-    resp = await client.post(
-        "/api/v1/organizations", json={"name": name, "slug": slug}, headers=_auth(token)
-    )
+async def _make_superuser(db_session, user_id: UUID | str) -> None:
+    await _set_superuser(db_session, user_id, True)
+
+
+async def _create_org(client, db_session, token: str, *, name: str = "Acme Inc", slug: str) -> dict:
+    """Organization/tenant creation is superuser-only — transiently promotes
+    the acting token's user, then demotes them back so the rest of the test
+    still exercises regular non-superuser membership/permission behavior."""
+    user_id = (await client.get("/api/v1/users/me", headers=_auth(token))).json()["id"]
+    await _make_superuser(db_session, user_id)
+    resp = await client.post("/api/v1/organizations", json={"name": name, "slug": slug}, headers=_auth(token))
     assert resp.status_code == 201, resp.text
+    await _set_superuser(db_session, user_id, False)
     return resp.json()
 
 
-async def _add_member(
-    client, token: str, org_id: str, user_id: str, *, role_code: str | None = None
-):
+async def _add_member(client, token: str, org_id: str, user_id: str, *, role_code: str | None = None):
     payload: dict = {"user_id": user_id}
     if role_code is not None:
         payload["role_code"] = role_code
-    return await client.post(
-        f"/api/v1/organizations/{org_id}/members", json=payload, headers=_auth(token)
-    )
+    return await client.post(f"/api/v1/organizations/{org_id}/members", json=payload, headers=_auth(token))
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +110,8 @@ async def outsider_token(client, outsider):
 
 
 @pytest.fixture
-async def organization(client, owner_token):
-    return await _create_org(client, owner_token, slug="acme")
+async def organization(client, db_session, owner_token):
+    return await _create_org(client, db_session, owner_token, slug="acme")
 
 
 @pytest.fixture
@@ -135,19 +134,19 @@ def debug_mode(monkeypatch):
 
 class TestCreateOrganization:
     @pytest.mark.anyio
-    async def test_creator_becomes_owner(self, client, owner, owner_token) -> None:
-        org = await _create_org(client, owner_token, slug="acme-create")
+    async def test_creator_becomes_owner(self, client, db_session, owner, owner_token) -> None:
+        org = await _create_org(client, db_session, owner_token, slug="acme-create")
         assert org["owner_id"] == owner["id"]
 
-        members = await client.get(
-            f"/api/v1/organizations/{org['id']}/members", headers=_auth(owner_token)
-        )
+        members = await client.get(f"/api/v1/organizations/{org['id']}/members", headers=_auth(owner_token))
         roles_by_user = {m["user_id"]: m["role_code"] for m in members.json()}
         assert roles_by_user[owner["id"]] == "owner"
 
     @pytest.mark.anyio
-    async def test_duplicate_slug_returns_409(self, client, owner_token) -> None:
-        await _create_org(client, owner_token, slug="dup-slug")
+    async def test_duplicate_slug_returns_409(self, client, db_session, owner_token) -> None:
+        await _create_org(client, db_session, owner_token, slug="dup-slug")
+        user_id = (await client.get("/api/v1/users/me", headers=_auth(owner_token))).json()["id"]
+        await _make_superuser(db_session, user_id)
         resp = await client.post(
             "/api/v1/organizations",
             json={"name": "Other", "slug": "dup-slug"},
@@ -157,46 +156,34 @@ class TestCreateOrganization:
 
     @pytest.mark.anyio
     async def test_unauthenticated_cannot_create(self, client) -> None:
-        resp = await client.post(
-            "/api/v1/organizations", json={"name": "X", "slug": "no-auth"}
-        )
+        resp = await client.post("/api/v1/organizations", json={"name": "X", "slug": "no-auth"})
         assert resp.status_code == 401
 
 
 class TestGetOrganization:
     @pytest.mark.anyio
     async def test_member_can_get(self, client, organization, owner_token) -> None:
-        resp = await client.get(
-            f"/api/v1/organizations/{organization['id']}", headers=_auth(owner_token)
-        )
+        resp = await client.get(f"/api/v1/organizations/{organization['id']}", headers=_auth(owner_token))
         assert resp.status_code == 200
 
     @pytest.mark.anyio
     async def test_outsider_cannot_get_org_they_dont_belong_to(
         self, client, organization, outsider_token
     ) -> None:
-        resp = await client.get(
-            f"/api/v1/organizations/{organization['id']}", headers=_auth(outsider_token)
-        )
+        resp = await client.get(f"/api/v1/organizations/{organization['id']}", headers=_auth(outsider_token))
         assert resp.status_code == 403
 
     @pytest.mark.anyio
     async def test_unknown_organization_returns_404(self, client, owner_token) -> None:
-        resp = await client.get(
-            f"/api/v1/organizations/{uuid4()}", headers=_auth(owner_token)
-        )
+        resp = await client.get(f"/api/v1/organizations/{uuid4()}", headers=_auth(owner_token))
         assert resp.status_code == 404
 
     @pytest.mark.anyio
-    async def test_superuser_can_get_any_organization(
-        self, client, organization, db_session
-    ) -> None:
+    async def test_superuser_can_get_any_organization(self, client, organization, db_session) -> None:
         su = await _register(client, "super1@test.com")
         await _make_superuser(db_session, su["id"])
         token = await _login_token(client, "super1@test.com")
-        resp = await client.get(
-            f"/api/v1/organizations/{organization['id']}", headers=_auth(token)
-        )
+        resp = await client.get(f"/api/v1/organizations/{organization['id']}", headers=_auth(token))
         assert resp.status_code == 200
 
 
@@ -240,14 +227,10 @@ class TestUpdateOrganization:
 class TestDeleteOrganization:
     @pytest.mark.anyio
     async def test_owner_can_delete(self, client, organization, owner_token) -> None:
-        resp = await client.delete(
-            f"/api/v1/organizations/{organization['id']}", headers=_auth(owner_token)
-        )
+        resp = await client.delete(f"/api/v1/organizations/{organization['id']}", headers=_auth(owner_token))
         assert resp.status_code == 204
 
-        resp = await client.get(
-            f"/api/v1/organizations/{organization['id']}", headers=_auth(owner_token)
-        )
+        resp = await client.get(f"/api/v1/organizations/{organization['id']}", headers=_auth(owner_token))
         assert resp.status_code == 404
 
     @pytest.mark.anyio
@@ -257,9 +240,7 @@ class TestDeleteOrganization:
         resp = await _add_member(client, owner_token, organization["id"], member["id"])
         assert resp.status_code == 201, resp.text
 
-        resp = await client.delete(
-            f"/api/v1/organizations/{organization['id']}", headers=_auth(member_token)
-        )
+        resp = await client.delete(f"/api/v1/organizations/{organization['id']}", headers=_auth(member_token))
         assert resp.status_code == 403
 
 
@@ -278,17 +259,13 @@ class TestMembership:
         assert resp.json()["role_code"] == "member"
 
     @pytest.mark.anyio
-    async def test_add_existing_member_returns_409(
-        self, client, organization, owner_token, member
-    ) -> None:
+    async def test_add_existing_member_returns_409(self, client, organization, owner_token, member) -> None:
         await _add_member(client, owner_token, organization["id"], member["id"])
         resp = await _add_member(client, owner_token, organization["id"], member["id"])
         assert resp.status_code == 409
 
     @pytest.mark.anyio
-    async def test_add_unknown_user_returns_404(
-        self, client, organization, owner_token
-    ) -> None:
+    async def test_add_unknown_user_returns_404(self, client, organization, owner_token) -> None:
         resp = await _add_member(client, owner_token, organization["id"], str(uuid4()))
         assert resp.status_code == 404
 
@@ -296,9 +273,7 @@ class TestMembership:
     async def test_outsider_cannot_add_member_to_org_they_dont_belong_to(
         self, client, organization, outsider_token, member
     ) -> None:
-        resp = await _add_member(
-            client, outsider_token, organization["id"], member["id"]
-        )
+        resp = await _add_member(client, outsider_token, organization["id"], member["id"])
         assert resp.status_code == 403
 
     @pytest.mark.anyio
@@ -327,9 +302,7 @@ class TestMembership:
         assert resp.status_code == 403
 
     @pytest.mark.anyio
-    async def test_cannot_remove_last_owner(
-        self, client, organization, owner, owner_token
-    ) -> None:
+    async def test_cannot_remove_last_owner(self, client, organization, owner, owner_token) -> None:
         resp = await client.delete(
             f"/api/v1/organizations/{organization['id']}/members/{owner['id']}",
             headers=_auth(owner_token),
@@ -337,9 +310,7 @@ class TestMembership:
         assert resp.status_code == 409
 
     @pytest.mark.anyio
-    async def test_cannot_demote_last_owner(
-        self, client, organization, owner, owner_token
-    ) -> None:
+    async def test_cannot_demote_last_owner(self, client, organization, owner, owner_token) -> None:
         resp = await client.patch(
             f"/api/v1/organizations/{organization['id']}/members/{owner['id']}",
             json={"role_code": "member"},
@@ -441,9 +412,7 @@ class TestRoleAssignmentGuard:
 
         # member holds "billing" (organizations:read) and grants that same
         # role to outsider — within their own permission envelope.
-        await _add_member(
-            client, owner_token, organization["id"], member["id"], role_code="billing"
-        )
+        await _add_member(client, owner_token, organization["id"], member["id"], role_code="billing")
         await _add_member(client, owner_token, organization["id"], outsider["id"])
 
         resp = await client.patch(
@@ -501,9 +470,7 @@ class TestRoleAssignmentGuard:
             headers=_auth(owner_token),
         )
 
-        await _add_member(
-            client, owner_token, organization["id"], member["id"], role_code="narrow"
-        )
+        await _add_member(client, owner_token, organization["id"], member["id"], role_code="narrow")
         await _add_member(client, owner_token, organization["id"], outsider["id"])
 
         resp = await client.patch(
@@ -521,9 +488,7 @@ class TestRoleAssignmentGuard:
 
 class TestRoleManagement:
     @pytest.mark.anyio
-    async def test_superuser_can_create_global_role(
-        self, client, owner, owner_token, db_session
-    ) -> None:
+    async def test_superuser_can_create_global_role(self, client, owner, owner_token, db_session) -> None:
         await _make_superuser(db_session, owner["id"])
         resp = await client.post(
             "/api/v1/roles",
@@ -534,9 +499,7 @@ class TestRoleManagement:
         assert resp.json()["organization_id"] is None
 
     @pytest.mark.anyio
-    async def test_non_superuser_cannot_create_global_role(
-        self, client, owner_token
-    ) -> None:
+    async def test_non_superuser_cannot_create_global_role(self, client, owner_token) -> None:
         resp = await client.post(
             "/api/v1/roles",
             json={"name": "Sneaky Global", "code": "sneaky_global"},
@@ -569,22 +532,18 @@ class TestRoleManagement:
             "code": "reviewer",
             "organization_id": organization["id"],
         }
-        resp1 = await client.post(
-            "/api/v1/roles", json=payload, headers=_auth(owner_token)
-        )
+        resp1 = await client.post("/api/v1/roles", json=payload, headers=_auth(owner_token))
         assert resp1.status_code == 201, resp1.text
-        resp2 = await client.post(
-            "/api/v1/roles", json=payload, headers=_auth(owner_token)
-        )
+        resp2 = await client.post("/api/v1/roles", json=payload, headers=_auth(owner_token))
         assert resp2.status_code == 409
 
     @pytest.mark.anyio
     async def test_two_organizations_can_reuse_the_same_custom_role_code(
-        self, client, organization, owner_token
+        self, client, db_session, organization, owner_token
     ) -> None:
         await _register(client, "other-owner@test.com")
         other_owner_token = await _login_token(client, "other-owner@test.com")
-        other_org = await _create_org(client, other_owner_token, slug="globex")
+        other_org = await _create_org(client, db_session, other_owner_token, slug="globex")
 
         resp1 = await client.post(
             "/api/v1/roles",
@@ -609,9 +568,7 @@ class TestRoleManagement:
         assert resp2.status_code == 201, resp2.text
 
     @pytest.mark.anyio
-    async def test_cannot_delete_system_role(
-        self, client, organization, owner, owner_token
-    ) -> None:
+    async def test_cannot_delete_system_role(self, client, organization, owner, owner_token) -> None:
         resp = await client.get("/api/v1/roles", headers=_auth(owner_token))
         assert resp.status_code == 200
         # "owner"/"member" are global-catalog-listed only when global; this
@@ -621,16 +578,12 @@ class TestRoleManagement:
             f"/api/v1/organizations/{organization['id']}/members",
             headers=_auth(owner_token),
         )
-        owner_membership = next(
-            m for m in members.json() if m["user_id"] == owner["id"]
-        )
+        owner_membership = next(m for m in members.json() if m["user_id"] == owner["id"])
         assert owner_membership["role_code"] == "owner"
 
         roles_resp = await client.get("/api/v1/roles", headers=_auth(owner_token))
         global_codes = {r["code"] for r in roles_resp.json()}
-        assert (
-            "owner" not in global_codes
-        )  # confirms it really is org-scoped, not global
+        assert "owner" not in global_codes  # confirms it really is org-scoped, not global
 
     @pytest.mark.anyio
     async def test_cannot_delete_role_currently_assigned_to_a_member(
@@ -657,9 +610,7 @@ class TestRoleManagement:
         )
         assert resp.status_code == 201, resp.text
 
-        resp = await client.delete(
-            f"/api/v1/roles/{role['id']}", headers=_auth(owner_token)
-        )
+        resp = await client.delete(f"/api/v1/roles/{role['id']}", headers=_auth(owner_token))
         assert resp.status_code == 409
 
 
@@ -687,9 +638,7 @@ class TestListOrganizations:
 # ---------------------------------------------------------------------------
 
 
-async def _invite(
-    client, token: str, org_id: str, email: str, *, role_code: str | None = None
-):
+async def _invite(client, token: str, org_id: str, email: str, *, role_code: str | None = None):
     payload: dict = {"email": email}
     if role_code is not None:
         payload["role_code"] = role_code
@@ -713,18 +662,14 @@ class TestOrganizationInvitations:
     async def test_owner_can_invite_and_invitee_accepts(
         self, client, organization, owner_token, outsider, outsider_token, debug_mode
     ) -> None:
-        invite_resp = await _invite(
-            client, owner_token, organization["id"], outsider["email"]
-        )
+        invite_resp = await _invite(client, owner_token, organization["id"], outsider["email"])
         assert invite_resp.status_code == 201, invite_resp.text
         invitation = invite_resp.json()
         assert invitation["email"] == outsider["email"]
         assert invitation["role_code"] == "member"
         assert invitation["invitation_token"] is not None
 
-        accept_resp = await _accept(
-            client, outsider_token, invitation["invitation_token"]
-        )
+        accept_resp = await _accept(client, outsider_token, invitation["invitation_token"])
         assert accept_resp.status_code == 200, accept_resp.text
         assert accept_resp.json()["role_code"] == "member"
 
@@ -747,9 +692,7 @@ class TestOrganizationInvitations:
         self, client, organization, owner_token, member, member_token, outsider
     ) -> None:
         await _add_member(client, owner_token, organization["id"], member["id"])
-        resp = await _invite(
-            client, member_token, organization["id"], outsider["email"]
-        )
+        resp = await _invite(client, member_token, organization["id"], outsider["email"])
         assert resp.status_code == 403
 
     @pytest.mark.anyio
@@ -761,9 +704,7 @@ class TestOrganizationInvitations:
         assert resp.status_code == 409
 
     @pytest.mark.anyio
-    async def test_accept_with_garbage_token_returns_401(
-        self, client, outsider_token
-    ) -> None:
+    async def test_accept_with_garbage_token_returns_401(self, client, outsider_token) -> None:
         resp = await _accept(client, outsider_token, "not-a-real-token")
         assert resp.status_code == 401
 
@@ -779,9 +720,7 @@ class TestOrganizationInvitations:
     ) -> None:
         """The invitation is bound to the invited email — a different logged-in
         account can't redeem someone else's invite even with a valid token."""
-        invite_resp = await _invite(
-            client, owner_token, organization["id"], outsider["email"]
-        )
+        invite_resp = await _invite(client, owner_token, organization["id"], outsider["email"])
         token = invite_resp.json()["invitation_token"]
 
         resp = await _accept(client, member_token, token)
@@ -797,9 +736,7 @@ class TestOrganizationInvitations:
         outsider_token,
         debug_mode,
     ) -> None:
-        invite_resp = await _invite(
-            client, owner_token, organization["id"], outsider["email"]
-        )
+        invite_resp = await _invite(client, owner_token, organization["id"], outsider["email"])
         invitation = invite_resp.json()
 
         revoke_resp = await client.delete(
@@ -812,9 +749,7 @@ class TestOrganizationInvitations:
         assert resp.status_code == 401
 
     @pytest.mark.anyio
-    async def test_revoke_unknown_invitation_returns_404(
-        self, client, organization, owner_token
-    ) -> None:
+    async def test_revoke_unknown_invitation_returns_404(self, client, organization, owner_token) -> None:
         resp = await client.delete(
             f"/api/v1/organizations/{organization['id']}/invitations/{uuid4()}",
             headers=_auth(owner_token),
@@ -831,9 +766,7 @@ class TestOrganizationInvitations:
         outsider_token,
         debug_mode,
     ) -> None:
-        invite_resp = await _invite(
-            client, owner_token, organization["id"], outsider["email"]
-        )
+        invite_resp = await _invite(client, owner_token, organization["id"], outsider["email"])
         invitation = invite_resp.json()
 
         pending = await client.get(
@@ -860,14 +793,10 @@ class TestOrganizationInvitations:
         outsider_token,
         debug_mode,
     ) -> None:
-        first = await _invite(
-            client, owner_token, organization["id"], outsider["email"]
-        )
+        first = await _invite(client, owner_token, organization["id"], outsider["email"])
         first_token = first.json()["invitation_token"]
 
-        second = await _invite(
-            client, owner_token, organization["id"], outsider["email"]
-        )
+        second = await _invite(client, owner_token, organization["id"], outsider["email"])
         second_token = second.json()["invitation_token"]
 
         stale = await _accept(client, outsider_token, first_token)

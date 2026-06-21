@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import or_, select
-
 from app.infrastructure.db.models.policy import Policy
 from app.infrastructure.db.repositories.base_repository import BaseRepository
+from sqlalchemy import or_, select
 
 _WILDCARD = "*"
 

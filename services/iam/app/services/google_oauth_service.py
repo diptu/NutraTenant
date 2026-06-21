@@ -14,8 +14,6 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy.exc import IntegrityError
-
 from app.core.config import Settings
 from app.domain.exceptions import (
     GoogleAccountConflictError,
@@ -28,6 +26,7 @@ from app.infrastructure.db.repositories.user_repo import UserRepository
 from app.infrastructure.security.google_oidc import GoogleIdentity, GoogleOIDCClient
 from app.infrastructure.security.oauth_state_store import OAuthStateStore
 from app.services.auth_service import AuthService
+from sqlalchemy.exc import IntegrityError
 
 
 class GoogleOAuthService:
@@ -61,16 +60,12 @@ class GoogleOAuthService:
         token_response = await self._oidc_client.exchange_code(code)
         id_token = token_response.get("id_token")
         if not id_token:
-            raise GoogleTokenVerificationError(
-                "Google token response did not include an id_token"
-            )
+            raise GoogleTokenVerificationError("Google token response did not include an id_token")
 
-        identity = await self._oidc_client.verify_id_token(
-            id_token, expected_nonce=nonce
-        )
+        identity = await self._oidc_client.verify_id_token(id_token, expected_nonce=nonce)
         user, event_type = await self._resolve_user(identity)
 
-        access_token, refresh_token = await self._auth_service.issue_new_session(
+        token_pair = await self._auth_service.issue_new_session(
             user, ip_address=ip_address, user_agent=user_agent
         )
         await self._audit(
@@ -80,7 +75,7 @@ class GoogleOAuthService:
             user_agent=user_agent,
             context={"google_subject": identity.subject},
         )
-        return access_token, refresh_token, user
+        return token_pair.access_token, token_pair.refresh_token, user
 
     async def _resolve_user(self, identity: GoogleIdentity) -> tuple[User, str]:
         existing_by_subject = await self._users.get_by_google_subject(identity.subject)
@@ -98,8 +93,7 @@ class GoogleOAuthService:
                     context={"google_subject": identity.subject},
                 )
                 raise GoogleTokenVerificationError(
-                    "Google has not verified this email — refusing to link it to an "
-                    "existing account"
+                    "Google has not verified this email — refusing to link it to an existing account"
                 )
             if (
                 existing_by_email.google_subject is not None
@@ -108,9 +102,7 @@ class GoogleOAuthService:
                 # This email is already linked to a *different* Google
                 # account — silently reassigning ownership here would let a
                 # second Google account hijack a user it doesn't control.
-                raise GoogleAccountConflictError(
-                    "This email is already linked to a different Google account"
-                )
+                raise GoogleAccountConflictError("This email is already linked to a different Google account")
             existing_by_email.google_subject = identity.subject
             existing_by_email.updated_at = datetime.now(UTC)
             try:

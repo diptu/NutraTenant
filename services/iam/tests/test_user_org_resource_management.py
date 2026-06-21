@@ -8,12 +8,11 @@ pre-migration module paths — uncollectible, out of scope here).
 from __future__ import annotations
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
-
 from app.api.v1.dependencies import get_token_cache
 from app.infrastructure.db.models.user import User
 from app.infrastructure.security.token_cache import InMemoryTokenCache
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
 
@@ -27,17 +26,13 @@ async def client_ctx(app):
         yield ac
 
 
-async def _register_and_login(
-    client: AsyncClient, email: str, *, full_name: str | None = None
-) -> str:
+async def _register_and_login(client: AsyncClient, email: str, *, full_name: str | None = None) -> str:
     password = "Sup3rSecret!23"
     await client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": full_name},
     )
-    response = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": password}
-    )
+    response = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     return response.json()["access_token"]
 
 
@@ -45,12 +40,37 @@ def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _make_superuser(db_session, email: str) -> None:
-    user = (
-        await db_session.execute(select(User).where(User.email == email))
-    ).scalar_one()
-    user.is_superuser = True
+async def _set_superuser(db_session, email: str, value: bool) -> None:
+    user = (await db_session.execute(select(User).where(User.email == email))).scalar_one()
+    user.is_superuser = value
     await db_session.commit()
+
+
+async def _make_superuser(db_session, email: str) -> None:
+    await _set_superuser(db_session, email, True)
+
+
+async def _create_org(
+    client_ctx,
+    db_session,
+    token: str,
+    *,
+    email: str,
+    slug: str,
+    name: str = "Acme",
+    description: str | None = None,
+) -> dict:
+    """Organization creation is superuser-only — transiently promotes the
+    acting account, then demotes it back so the rest of the test still
+    exercises regular non-superuser behavior."""
+    await _make_superuser(db_session, email)
+    payload: dict = {"name": name, "slug": slug}
+    if description is not None:
+        payload["description"] = description
+    resp = await client_ctx.post("/api/v1/organizations", json=payload, headers=_auth(token))
+    assert resp.status_code == 201, resp.text
+    await _set_superuser(db_session, email, False)
+    return resp.json()
 
 
 # ---------------------------------------------------------------------------
@@ -59,9 +79,7 @@ async def _make_superuser(db_session, email: str) -> None:
 
 
 async def test_get_my_profile(client_ctx):
-    token = await _register_and_login(
-        client_ctx, "alice@example.com", full_name="Alice"
-    )
+    token = await _register_and_login(client_ctx, "alice@example.com", full_name="Alice")
     response = await client_ctx.get("/api/v1/users/me", headers=_auth(token))
     assert response.status_code == 200
     assert response.json()["email"] == "alice@example.com"
@@ -79,9 +97,7 @@ async def test_list_users_as_superuser_supports_search(client_ctx, db_session):
     await _make_superuser(db_session, "admin@example.com")
     await _register_and_login(client_ctx, "bob@example.com", full_name="Bob Builder")
 
-    response = await client_ctx.get(
-        "/api/v1/users", params={"q": "bob"}, headers=_auth(admin_token)
-    )
+    response = await client_ctx.get("/api/v1/users", params={"q": "bob"}, headers=_auth(admin_token))
     assert response.status_code == 200
     emails = {u["email"] for u in response.json()}
     assert "bob@example.com" in emails
@@ -91,13 +107,9 @@ async def test_list_users_as_superuser_supports_search(client_ctx, db_session):
 async def test_get_other_user_forbidden_for_non_superuser(client_ctx):
     alice_token = await _register_and_login(client_ctx, "alice@example.com")
     bob_token = await _register_and_login(client_ctx, "bob@example.com")
-    bob_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))
-    ).json()["id"]
+    bob_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))).json()["id"]
 
-    response = await client_ctx.get(
-        f"/api/v1/users/{bob_id}", headers=_auth(alice_token)
-    )
+    response = await client_ctx.get(f"/api/v1/users/{bob_id}", headers=_auth(alice_token))
     assert response.status_code == 403
 
 
@@ -105,22 +117,16 @@ async def test_get_other_user_allowed_for_superuser(client_ctx, db_session):
     admin_token = await _register_and_login(client_ctx, "admin@example.com")
     await _make_superuser(db_session, "admin@example.com")
     bob_token = await _register_and_login(client_ctx, "bob@example.com")
-    bob_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))
-    ).json()["id"]
+    bob_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))).json()["id"]
 
-    response = await client_ctx.get(
-        f"/api/v1/users/{bob_id}", headers=_auth(admin_token)
-    )
+    response = await client_ctx.get(f"/api/v1/users/{bob_id}", headers=_auth(admin_token))
     assert response.status_code == 200
     assert response.json()["email"] == "bob@example.com"
 
 
 async def test_update_own_profile_succeeds_update_others_forbidden(client_ctx):
     alice_token = await _register_and_login(client_ctx, "alice@example.com")
-    alice_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(alice_token))
-    ).json()["id"]
+    alice_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(alice_token))).json()["id"]
     bob_token = await _register_and_login(client_ctx, "bob@example.com")
 
     own_update = await client_ctx.patch(
@@ -143,9 +149,7 @@ async def test_update_attributes_requires_superuser_and_merges(client_ctx, db_se
     admin_token = await _register_and_login(client_ctx, "admin@example.com")
     await _make_superuser(db_session, "admin@example.com")
     bob_token = await _register_and_login(client_ctx, "bob@example.com")
-    bob_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))
-    ).json()["id"]
+    bob_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))).json()["id"]
 
     forbidden = await client_ctx.patch(
         f"/api/v1/users/{bob_id}/attributes",
@@ -178,13 +182,9 @@ async def test_activate_deactivate_user(client_ctx, db_session):
     admin_token = await _register_and_login(client_ctx, "admin@example.com")
     await _make_superuser(db_session, "admin@example.com")
     bob_token = await _register_and_login(client_ctx, "bob@example.com")
-    bob_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))
-    ).json()["id"]
+    bob_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))).json()["id"]
 
-    deactivated = await client_ctx.post(
-        f"/api/v1/users/{bob_id}/deactivate", headers=_auth(admin_token)
-    )
+    deactivated = await client_ctx.post(f"/api/v1/users/{bob_id}/deactivate", headers=_auth(admin_token))
     assert deactivated.status_code == 200
     assert deactivated.json()["is_active"] is False
 
@@ -193,9 +193,7 @@ async def test_activate_deactivate_user(client_ctx, db_session):
     blocked = await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))
     assert blocked.status_code == 401
 
-    reactivated = await client_ctx.post(
-        f"/api/v1/users/{bob_id}/activate", headers=_auth(admin_token)
-    )
+    reactivated = await client_ctx.post(f"/api/v1/users/{bob_id}/activate", headers=_auth(admin_token))
     assert reactivated.status_code == 200
     assert reactivated.json()["is_active"] is True
 
@@ -204,18 +202,12 @@ async def test_delete_user(client_ctx, db_session):
     admin_token = await _register_and_login(client_ctx, "admin@example.com")
     await _make_superuser(db_session, "admin@example.com")
     bob_token = await _register_and_login(client_ctx, "bob@example.com")
-    bob_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))
-    ).json()["id"]
+    bob_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(bob_token))).json()["id"]
 
-    response = await client_ctx.delete(
-        f"/api/v1/users/{bob_id}", headers=_auth(admin_token)
-    )
+    response = await client_ctx.delete(f"/api/v1/users/{bob_id}", headers=_auth(admin_token))
     assert response.status_code == 204
 
-    follow_up = await client_ctx.get(
-        f"/api/v1/users/{bob_id}", headers=_auth(admin_token)
-    )
+    follow_up = await client_ctx.get(f"/api/v1/users/{bob_id}", headers=_auth(admin_token))
     assert follow_up.status_code == 404
 
 
@@ -224,89 +216,69 @@ async def test_delete_user(client_ctx, db_session):
 # ---------------------------------------------------------------------------
 
 
-async def test_create_organization_provisions_owner_membership(client_ctx):
+async def test_create_organization_provisions_owner_membership(client_ctx, db_session):
     token = await _register_and_login(client_ctx, "owner@example.com")
-    response = await client_ctx.post(
-        "/api/v1/organizations",
-        json={"name": "Acme", "slug": "acme", "description": "Acme Inc"},
-        headers=_auth(token),
+    org = await _create_org(
+        client_ctx,
+        db_session,
+        token,
+        email="owner@example.com",
+        slug="acme",
+        description="Acme Inc",
     )
-    assert response.status_code == 201
-    org_id = response.json()["id"]
+    org_id = org["id"]
 
-    members = await client_ctx.get(
-        f"/api/v1/organizations/{org_id}/members", headers=_auth(token)
-    )
+    members = await client_ctx.get(f"/api/v1/organizations/{org_id}/members", headers=_auth(token))
     assert members.status_code == 200
     assert len(members.json()) == 1
     assert members.json()[0]["role_code"] == "owner"
 
 
-async def test_create_organization_duplicate_slug_rejected(client_ctx):
+async def test_create_organization_duplicate_slug_rejected(client_ctx, db_session):
     token = await _register_and_login(client_ctx, "owner@example.com")
-    payload = {"name": "Acme", "slug": "acme"}
-    await client_ctx.post("/api/v1/organizations", json=payload, headers=_auth(token))
+    await _create_org(client_ctx, db_session, token, email="owner@example.com", slug="acme")
+    await _make_superuser(db_session, "owner@example.com")
     response = await client_ctx.post(
-        "/api/v1/organizations", json=payload, headers=_auth(token)
+        "/api/v1/organizations",
+        json={"name": "Acme", "slug": "acme"},
+        headers=_auth(token),
     )
     assert response.status_code == 409
 
 
-async def test_list_my_organizations_excludes_others(client_ctx):
+async def test_list_my_organizations_excludes_others(client_ctx, db_session):
     owner_token = await _register_and_login(client_ctx, "owner@example.com")
     stranger_token = await _register_and_login(client_ctx, "stranger@example.com")
-    await client_ctx.post(
-        "/api/v1/organizations",
-        json={"name": "Acme", "slug": "acme"},
-        headers=_auth(owner_token),
-    )
+    await _create_org(client_ctx, db_session, owner_token, email="owner@example.com", slug="acme")
 
-    owner_list = await client_ctx.get(
-        "/api/v1/organizations", headers=_auth(owner_token)
-    )
+    owner_list = await client_ctx.get("/api/v1/organizations", headers=_auth(owner_token))
     assert len(owner_list.json()) == 1
 
-    stranger_list = await client_ctx.get(
-        "/api/v1/organizations", headers=_auth(stranger_token)
-    )
+    stranger_list = await client_ctx.get("/api/v1/organizations", headers=_auth(stranger_token))
     assert len(stranger_list.json()) == 0
 
 
-async def test_get_organization_requires_membership(client_ctx):
+async def test_get_organization_requires_membership(client_ctx, db_session):
     owner_token = await _register_and_login(client_ctx, "owner@example.com")
     stranger_token = await _register_and_login(client_ctx, "stranger@example.com")
-    org_id = (
-        await client_ctx.post(
-            "/api/v1/organizations",
-            json={"name": "Acme", "slug": "acme"},
-            headers=_auth(owner_token),
-        )
-    ).json()["id"]
+    org_id = (await _create_org(client_ctx, db_session, owner_token, email="owner@example.com", slug="acme"))[
+        "id"
+    ]
 
-    forbidden = await client_ctx.get(
-        f"/api/v1/organizations/{org_id}", headers=_auth(stranger_token)
-    )
+    forbidden = await client_ctx.get(f"/api/v1/organizations/{org_id}", headers=_auth(stranger_token))
     assert forbidden.status_code == 403
 
-    allowed = await client_ctx.get(
-        f"/api/v1/organizations/{org_id}", headers=_auth(owner_token)
-    )
+    allowed = await client_ctx.get(f"/api/v1/organizations/{org_id}", headers=_auth(owner_token))
     assert allowed.status_code == 200
 
 
-async def test_update_organization_requires_owner(client_ctx):
+async def test_update_organization_requires_owner(client_ctx, db_session):
     owner_token = await _register_and_login(client_ctx, "owner@example.com")
     member_token = await _register_and_login(client_ctx, "member@example.com")
-    member_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))
-    ).json()["id"]
-    org_id = (
-        await client_ctx.post(
-            "/api/v1/organizations",
-            json={"name": "Acme", "slug": "acme"},
-            headers=_auth(owner_token),
-        )
-    ).json()["id"]
+    member_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))).json()["id"]
+    org_id = (await _create_org(client_ctx, db_session, owner_token, email="owner@example.com", slug="acme"))[
+        "id"
+    ]
     await client_ctx.post(
         f"/api/v1/organizations/{org_id}/members",
         json={"user_id": member_id, "role_code": "member"},
@@ -329,19 +301,13 @@ async def test_update_organization_requires_owner(client_ctx):
     assert allowed.json()["name"] == "Acme Corp"
 
 
-async def test_add_member_merges_org_default_attributes(client_ctx):
+async def test_add_member_merges_org_default_attributes(client_ctx, db_session):
     owner_token = await _register_and_login(client_ctx, "owner@example.com")
     member_token = await _register_and_login(client_ctx, "member@example.com")
-    member_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))
-    ).json()["id"]
-    org_id = (
-        await client_ctx.post(
-            "/api/v1/organizations",
-            json={"name": "Acme", "slug": "acme"},
-            headers=_auth(owner_token),
-        )
-    ).json()["id"]
+    member_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))).json()["id"]
+    org_id = (await _create_org(client_ctx, db_session, owner_token, email="owner@example.com", slug="acme"))[
+        "id"
+    ]
 
     await client_ctx.patch(
         f"/api/v1/organizations/{org_id}",
@@ -360,42 +326,28 @@ async def test_add_member_merges_org_default_attributes(client_ctx):
     assert profile.json()["attributes"] == {"region": "EU", "department": "Unassigned"}
 
 
-async def test_add_member_duplicate_rejected(client_ctx):
+async def test_add_member_duplicate_rejected(client_ctx, db_session):
     owner_token = await _register_and_login(client_ctx, "owner@example.com")
     member_token = await _register_and_login(client_ctx, "member@example.com")
-    member_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))
-    ).json()["id"]
-    org_id = (
-        await client_ctx.post(
-            "/api/v1/organizations",
-            json={"name": "Acme", "slug": "acme"},
-            headers=_auth(owner_token),
-        )
-    ).json()["id"]
+    member_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))).json()["id"]
+    org_id = (await _create_org(client_ctx, db_session, owner_token, email="owner@example.com", slug="acme"))[
+        "id"
+    ]
     body = {"user_id": member_id, "role_code": "member"}
-    await client_ctx.post(
-        f"/api/v1/organizations/{org_id}/members", json=body, headers=_auth(owner_token)
-    )
+    await client_ctx.post(f"/api/v1/organizations/{org_id}/members", json=body, headers=_auth(owner_token))
     response = await client_ctx.post(
         f"/api/v1/organizations/{org_id}/members", json=body, headers=_auth(owner_token)
     )
     assert response.status_code == 409
 
 
-async def test_add_member_unknown_role_rejected(client_ctx):
+async def test_add_member_unknown_role_rejected(client_ctx, db_session):
     owner_token = await _register_and_login(client_ctx, "owner@example.com")
     member_token = await _register_and_login(client_ctx, "member@example.com")
-    member_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))
-    ).json()["id"]
-    org_id = (
-        await client_ctx.post(
-            "/api/v1/organizations",
-            json={"name": "Acme", "slug": "acme"},
-            headers=_auth(owner_token),
-        )
-    ).json()["id"]
+    member_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))).json()["id"]
+    org_id = (await _create_org(client_ctx, db_session, owner_token, email="owner@example.com", slug="acme"))[
+        "id"
+    ]
 
     response = await client_ctx.post(
         f"/api/v1/organizations/{org_id}/members",
@@ -405,19 +357,13 @@ async def test_add_member_unknown_role_rejected(client_ctx):
     assert response.status_code == 404
 
 
-async def test_remove_member(client_ctx):
+async def test_remove_member(client_ctx, db_session):
     owner_token = await _register_and_login(client_ctx, "owner@example.com")
     member_token = await _register_and_login(client_ctx, "member@example.com")
-    member_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))
-    ).json()["id"]
-    org_id = (
-        await client_ctx.post(
-            "/api/v1/organizations",
-            json={"name": "Acme", "slug": "acme"},
-            headers=_auth(owner_token),
-        )
-    ).json()["id"]
+    member_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))).json()["id"]
+    org_id = (await _create_org(client_ctx, db_session, owner_token, email="owner@example.com", slug="acme"))[
+        "id"
+    ]
     await client_ctx.post(
         f"/api/v1/organizations/{org_id}/members",
         json={"user_id": member_id, "role_code": "member"},
@@ -430,39 +376,27 @@ async def test_remove_member(client_ctx):
     )
     assert remove_response.status_code == 204
 
-    no_longer_member = await client_ctx.get(
-        f"/api/v1/organizations/{org_id}", headers=_auth(member_token)
-    )
+    no_longer_member = await client_ctx.get(f"/api/v1/organizations/{org_id}", headers=_auth(member_token))
     assert no_longer_member.status_code == 403
 
 
-async def test_delete_organization_requires_owner(client_ctx):
+async def test_delete_organization_requires_owner(client_ctx, db_session):
     owner_token = await _register_and_login(client_ctx, "owner@example.com")
     member_token = await _register_and_login(client_ctx, "member@example.com")
-    member_id = (
-        await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))
-    ).json()["id"]
-    org_id = (
-        await client_ctx.post(
-            "/api/v1/organizations",
-            json={"name": "Acme", "slug": "acme"},
-            headers=_auth(owner_token),
-        )
-    ).json()["id"]
+    member_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))).json()["id"]
+    org_id = (await _create_org(client_ctx, db_session, owner_token, email="owner@example.com", slug="acme"))[
+        "id"
+    ]
     await client_ctx.post(
         f"/api/v1/organizations/{org_id}/members",
         json={"user_id": member_id, "role_code": "member"},
         headers=_auth(owner_token),
     )
 
-    forbidden = await client_ctx.delete(
-        f"/api/v1/organizations/{org_id}", headers=_auth(member_token)
-    )
+    forbidden = await client_ctx.delete(f"/api/v1/organizations/{org_id}", headers=_auth(member_token))
     assert forbidden.status_code == 403
 
-    allowed = await client_ctx.delete(
-        f"/api/v1/organizations/{org_id}", headers=_auth(owner_token)
-    )
+    allowed = await client_ctx.delete(f"/api/v1/organizations/{org_id}", headers=_auth(owner_token))
     assert allowed.status_code == 204
 
 
@@ -486,9 +420,7 @@ async def test_register_and_get_own_resource(client_ctx):
     assert response.status_code == 201
     resource_id = response.json()["id"]
 
-    get_response = await client_ctx.get(
-        f"/api/v1/resources/{resource_id}", headers=_auth(token)
-    )
+    get_response = await client_ctx.get(f"/api/v1/resources/{resource_id}", headers=_auth(token))
     assert get_response.status_code == 200
     assert get_response.json()["tags"] == {"Confidentiality": "High", "Region": "EU"}
 
@@ -504,9 +436,7 @@ async def test_private_resource_hidden_from_other_users(client_ctx):
         )
     ).json()["id"]
 
-    response = await client_ctx.get(
-        f"/api/v1/resources/{resource_id}", headers=_auth(stranger_token)
-    )
+    response = await client_ctx.get(f"/api/v1/resources/{resource_id}", headers=_auth(stranger_token))
     assert response.status_code == 404
 
     listing = await client_ctx.get("/api/v1/resources", headers=_auth(stranger_token))
@@ -524,9 +454,7 @@ async def test_public_resource_visible_to_everyone(client_ctx):
         )
     ).json()["id"]
 
-    response = await client_ctx.get(
-        f"/api/v1/resources/{resource_id}", headers=_auth(stranger_token)
-    )
+    response = await client_ctx.get(f"/api/v1/resources/{resource_id}", headers=_auth(stranger_token))
     assert response.status_code == 200
 
 
@@ -534,15 +462,11 @@ async def test_register_duplicate_resource_name_rejected(client_ctx):
     token = await _register_and_login(client_ctx, "owner@example.com")
     payload = {"name": "payroll-db", "type": "database"}
     await client_ctx.post("/api/v1/resources", json=payload, headers=_auth(token))
-    response = await client_ctx.post(
-        "/api/v1/resources", json=payload, headers=_auth(token)
-    )
+    response = await client_ctx.post("/api/v1/resources", json=payload, headers=_auth(token))
     assert response.status_code == 409
 
 
-async def test_update_and_delete_resource_requires_owner_or_superuser(
-    client_ctx, db_session
-):
+async def test_update_and_delete_resource_requires_owner_or_superuser(client_ctx, db_session):
     owner_token = await _register_and_login(client_ctx, "owner@example.com")
     stranger_token = await _register_and_login(client_ctx, "stranger@example.com")
     admin_token = await _register_and_login(client_ctx, "admin@example.com")
@@ -583,7 +507,5 @@ async def test_update_and_delete_resource_requires_owner_or_superuser(
     )
     assert stranger_delete.status_code == 403
 
-    owner_delete = await client_ctx.delete(
-        f"/api/v1/resources/{resource_id}", headers=_auth(owner_token)
-    )
+    owner_delete = await client_ctx.delete(f"/api/v1/resources/{resource_id}", headers=_auth(owner_token))
     assert owner_delete.status_code == 204

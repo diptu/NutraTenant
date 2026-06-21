@@ -24,10 +24,6 @@ from uuid import UUID, uuid4
 
 import jwt
 import pytest
-from fastapi import Depends, FastAPI
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
-
 from app.core.cache import (
     InMemoryPermissionCache,
     RedisPermissionCache,
@@ -42,6 +38,9 @@ from app.infrastructure.db.models.role import Role
 from app.infrastructure.db.models.user import User
 from app.services.org_permissions import get_member_permissions
 from app.services.rbac_seed import seed_rbac_catalog
+from fastapi import Depends, FastAPI
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,36 +74,42 @@ def _auth(token: str) -> dict:
 
 
 async def _register(client, email: str, password: str = "Password123!") -> dict:
-    resp = await client.post(
-        "/api/v1/auth/register", json={"email": email, "password": password}
-    )
+    resp = await client.post("/api/v1/auth/register", json={"email": email, "password": password})
     assert resp.status_code == 201, resp.text
     return resp.json()
 
 
 async def _login_token(client, email: str, password: str = "Password123!") -> str:
-    resp = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": password}
-    )
+    resp = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
 
 
-async def _make_superuser(db_session, user_id: UUID | str) -> None:
+async def _set_superuser(db_session, user_id: UUID | str, value: bool) -> None:
     result = await db_session.execute(select(User).where(User.id == UUID(str(user_id))))
     user = result.scalar_one()
-    user.is_superuser = True
+    user.is_superuser = value
     db_session.add(user)
     await db_session.commit()
 
 
-async def _create_org(client, token: str, *, slug: str) -> dict:
+async def _make_superuser(db_session, user_id: UUID | str) -> None:
+    await _set_superuser(db_session, user_id, True)
+
+
+async def _create_org(client, db_session, token: str, *, slug: str) -> dict:
+    """Organization creation is superuser-only — transiently promotes the
+    acting token's user, then demotes them back so the rest of the test
+    still exercises regular non-superuser behavior."""
+    user_id = (await client.get("/api/v1/users/me", headers=_auth(token))).json()["id"]
+    await _make_superuser(db_session, user_id)
     resp = await client.post(
         "/api/v1/organizations",
         json={"name": "Acme Inc", "slug": slug},
         headers=_auth(token),
     )
     assert resp.status_code == 201, resp.text
+    await _set_superuser(db_session, user_id, False)
     return resp.json()
 
 
@@ -163,8 +168,8 @@ async def member_token(client, member):
 
 
 @pytest.fixture
-async def organization(client, owner_token):
-    return await _create_org(client, owner_token, slug="acme")
+async def organization(client, db_session, owner_token):
+    return await _create_org(client, db_session, owner_token, slug="acme")
 
 
 # ---------------------------------------------------------------------------
@@ -192,16 +197,12 @@ class TestJWTValidation:
 
     @pytest.mark.anyio
     async def test_expired_token_returns_401(self, protected_client) -> None:
-        token = _mint_token(
-            uuid4(), permissions=["users:create"], expires_delta=timedelta(minutes=-5)
-        )
+        token = _mint_token(uuid4(), permissions=["users:create"], expires_delta=timedelta(minutes=-5))
         resp = await protected_client.get("/protected", headers=_auth(token))
         assert resp.status_code == 401
 
     @pytest.mark.anyio
-    async def test_refresh_token_type_rejected_on_access_route(
-        self, protected_client
-    ) -> None:
+    async def test_refresh_token_type_rejected_on_access_route(self, protected_client) -> None:
         token = _mint_token(uuid4(), permissions=["users:create"], token_type="refresh")
         resp = await protected_client.get("/protected", headers=_auth(token))
         assert resp.status_code == 401
@@ -214,26 +215,20 @@ class TestJWTValidation:
 
 class TestPermissionBasedAuthorization:
     @pytest.mark.anyio
-    async def test_token_with_required_permission_succeeds(
-        self, protected_client
-    ) -> None:
+    async def test_token_with_required_permission_succeeds(self, protected_client) -> None:
         token = _mint_token(uuid4(), permissions=["users:create", "users:read"])
         resp = await protected_client.get("/protected", headers=_auth(token))
         assert resp.status_code == 200
 
     @pytest.mark.anyio
-    async def test_token_missing_required_permission_returns_clean_403(
-        self, protected_client
-    ) -> None:
+    async def test_token_missing_required_permission_returns_clean_403(self, protected_client) -> None:
         token = _mint_token(uuid4(), permissions=["users:read"])
         resp = await protected_client.get("/protected", headers=_auth(token))
         assert resp.status_code == 403
         assert "users:create" in resp.json()["detail"]
 
     @pytest.mark.anyio
-    async def test_token_with_no_permissions_returns_403(
-        self, protected_client
-    ) -> None:
+    async def test_token_with_no_permissions_returns_403(self, protected_client) -> None:
         token = _mint_token(uuid4(), permissions=[])
         resp = await protected_client.get("/protected", headers=_auth(token))
         assert resp.status_code == 403
@@ -264,19 +259,14 @@ class TestPermissionCatalogSeeding:
 
     @pytest.mark.anyio
     async def test_admin_role_holds_full_platform_catalog(self, db_session) -> None:
-        from sqlalchemy.orm import selectinload
-
         from app.infrastructure.db.models.associations import RolePermission
+        from sqlalchemy.orm import selectinload
 
         await seed_rbac_catalog(db_session)
         result = await db_session.execute(
             select(Role)
             .where(Role.code == "admin", Role.organization_id.is_(None))
-            .options(
-                selectinload(Role.role_permissions).selectinload(
-                    RolePermission.permission
-                )
-            )
+            .options(selectinload(Role.role_permissions).selectinload(RolePermission.permission))
         )
         role = result.scalar_one()
         assert {p.code for p in role.permissions} == set(PLATFORM_PERMISSIONS.values())
@@ -284,18 +274,13 @@ class TestPermissionCatalogSeeding:
     @pytest.mark.anyio
     async def test_guest_role_holds_no_platform_permissions(self, db_session) -> None:
         await seed_rbac_catalog(db_session)
-        from sqlalchemy.orm import selectinload
-
         from app.infrastructure.db.models.associations import RolePermission
+        from sqlalchemy.orm import selectinload
 
         result = await db_session.execute(
             select(Role)
             .where(Role.code == "guest", Role.organization_id.is_(None))
-            .options(
-                selectinload(Role.role_permissions).selectinload(
-                    RolePermission.permission
-                )
-            )
+            .options(selectinload(Role.role_permissions).selectinload(RolePermission.permission))
         )
         role = result.scalar_one_or_none()
         if role is None:
@@ -373,9 +358,7 @@ class TestRolePermissionAssignment:
         assert resp.status_code == 404
 
     @pytest.mark.anyio
-    async def test_remove_permission_from_role(
-        self, client, owner, owner_token, db_session
-    ) -> None:
+    async def test_remove_permission_from_role(self, client, owner, owner_token, db_session) -> None:
         await _make_superuser(db_session, owner["id"])
         await seed_rbac_catalog(db_session)
         resp = await client.post(
@@ -389,9 +372,7 @@ class TestRolePermissionAssignment:
             json={"permission_codes": ["users:read", "users:create"]},
             headers=_auth(owner_token),
         )
-        target = next(
-            p for p in resp.json()["permissions"] if p["code"] == "users:read"
-        )
+        target = next(p for p in resp.json()["permissions"] if p["code"] == "users:read")
 
         resp = await client.delete(
             f"/api/v1/roles/{role['id']}/permissions/{target['id']}",
@@ -513,9 +494,7 @@ class TestPermissionCache:
         yield
         reset_permission_cache()
 
-    def _member(
-        self, *, permission_codes: set[str], updated_at: datetime
-    ) -> UserOrganizationRole:
+    def _member(self, *, permission_codes: set[str], updated_at: datetime) -> UserOrganizationRole:
         # Duck-typed stand-in: get_member_permissions only ever touches
         # .user_id / .role.id / .role.updated_at / .role.permissions[*].code,
         # so a real DB-backed membership isn't needed for this test.
@@ -576,9 +555,7 @@ class TestPermissionCache:
         assert second == set()
 
     @pytest.mark.anyio
-    async def test_redis_construction_failure_falls_back_to_in_memory(
-        self, monkeypatch
-    ) -> None:
+    async def test_redis_construction_failure_falls_back_to_in_memory(self, monkeypatch) -> None:
         monkeypatch.setattr(get_settings(), "redis_url", "not a valid redis url")
         cache = get_permission_cache()
         assert isinstance(cache, InMemoryPermissionCache)

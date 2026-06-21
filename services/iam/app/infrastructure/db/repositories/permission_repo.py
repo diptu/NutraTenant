@@ -2,11 +2,10 @@
 
 import uuid
 
-from sqlalchemy import select
-
 from app.infrastructure.db.models.associations import RolePermission
 from app.infrastructure.db.models.permission import Permission
 from app.infrastructure.db.repositories.base_repository import BaseRepository
+from sqlalchemy import select
 
 
 class PermissionRepository(BaseRepository[Permission]):

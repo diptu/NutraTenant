@@ -13,17 +13,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "nutratenant-identity-service"
     environment: str = "development"
     debug: bool = False
 
-    database_url: str = (
-        "postgresql+asyncpg://postgres:postgres@localhost:5433/nutratenant_identity"
-    )
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5433/nutratenant_identity"
     redis_url: str = "redis://localhost:6379/0"
 
     jwt_secret_key: str = "change-me-to-a-long-random-value"
@@ -31,16 +27,22 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
     password_reset_token_expire_minutes: int = 30
-    organization_invitation_expire_minutes: int = 7 * 24 * 60
+    # 24h (86,400s) — the explicit TTL requirement for tenant invitations.
+    organization_invitation_expire_minutes: int = 24 * 60
+
+    mfa_challenge_token_expire_minutes: int = 5
+    mfa_recovery_code_count: int = 8
+    # Fernet key encrypting TOTP secrets at rest (unlike a password, a TOTP
+    # secret can't be one-way hashed — verification needs the original
+    # value back). Dev-only default; override in any real deployment.
+    mfa_secret_encryption_key: str = "JsaKd0V4JCvvLuGZU7JCfzV559YLSa-uGe6hfgCTajg="
 
     google_client_id: str = ""
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:8000/api/v1/auth/google/callback"
     google_oauth_state_ttl_seconds: int = 600
 
-    cors_allow_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000"]
-    )
+    cors_allow_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
     rate_limit_window_seconds: int = 60
     rate_limit_max_requests: int = 60

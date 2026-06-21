@@ -12,11 +12,10 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from app.infrastructure.db.base import Base
 from sqlalchemy import Boolean, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.infrastructure.db.base import Base
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.organization import Organization
@@ -29,13 +28,9 @@ class UserOrganizationRole(Base):
     """A user's single role within one organization (table: organization_members)."""
 
     __tablename__ = "organization_members"
-    __table_args__ = (
-        UniqueConstraint("organization_id", "user_id", name="uq_organization_member"),
-    )
+    __table_args__ = (UniqueConstraint("organization_id", "user_id", name="uq_organization_member"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("organizations.id", ondelete="CASCADE"),
@@ -53,19 +48,11 @@ class UserOrganizationRole(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    user: Mapped[User] = relationship(
-        back_populates="org_roles", lazy="raise", foreign_keys=[user_id]
-    )
-    organization: Mapped[Organization] = relationship(
-        back_populates="members", lazy="raise"
-    )
+    user: Mapped[User] = relationship(back_populates="org_roles", lazy="raise", foreign_keys=[user_id])
+    organization: Mapped[Organization] = relationship(back_populates="members", lazy="raise")
     role: Mapped[Role] = relationship(lazy="raise")
 
 
@@ -73,13 +60,9 @@ class RolePermission(Base):
     """A permission granted to a role (table: role_permissions)."""
 
     __tablename__ = "role_permissions"
-    __table_args__ = (
-        UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),
-    )
+    __table_args__ = (UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     role_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False
     )
@@ -92,9 +75,7 @@ class RolePermission(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     role: Mapped[Role] = relationship(back_populates="role_permissions", lazy="raise")
     permission: Mapped[Permission] = relationship(lazy="raise")

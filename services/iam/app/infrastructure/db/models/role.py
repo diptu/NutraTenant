@@ -11,11 +11,10 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from app.infrastructure.db.base import Base
 from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.infrastructure.db.base import Base
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.associations import RolePermission
@@ -25,9 +24,7 @@ if TYPE_CHECKING:
 class Role(Base):
     __tablename__ = "roles"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # NOT unique (migration 0007 drops the blanket UNIQUE migration 0001 put
     # here): every organization provisions its own "Owner"/"Member" roles
     # using those literal display names, so a global UNIQUE on `name` broke
@@ -52,16 +49,10 @@ class Role(Base):
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    role_permissions: Mapped[list[RolePermission]] = relationship(
-        back_populates="role", lazy="raise"
-    )
+    role_permissions: Mapped[list[RolePermission]] = relationship(back_populates="role", lazy="raise")
 
     @property
     def permissions(self) -> list[Permission]:

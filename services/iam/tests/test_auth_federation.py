@@ -21,11 +21,6 @@ import httpx
 import jwt
 import pytest
 import respx
-from cryptography.hazmat.primitives.asymmetric import rsa
-from httpx import ASGITransport, AsyncClient
-from jwt.algorithms import RSAAlgorithm
-from sqlalchemy import select
-
 from app.api.v1.dependencies import get_token_cache
 from app.core.config import get_settings
 from app.infrastructure.db.models.audit_log import AuditLog
@@ -33,6 +28,10 @@ from app.infrastructure.db.models.refresh_token import RefreshToken
 from app.infrastructure.db.models.user import User
 from app.infrastructure.security.google_oidc import JWKS_URI, TOKEN_ENDPOINT
 from app.infrastructure.security.token_cache import InMemoryTokenCache
+from cryptography.hazmat.primitives.asymmetric import rsa
+from httpx import ASGITransport, AsyncClient
+from jwt.algorithms import RSAAlgorithm
+from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
 
@@ -89,9 +88,7 @@ def google_jwks(google_keypair):
     return {"keys": [jwk]}
 
 
-def _sign_id_token(
-    private_key, *, claims_overrides: dict | None = None, omit: tuple[str, ...] = ()
-):
+def _sign_id_token(private_key, *, claims_overrides: dict | None = None, omit: tuple[str, ...] = ()):
     settings = get_settings()
     now = int(time.time())
     claims = {
@@ -149,11 +146,7 @@ async def test_register_creates_user_and_audit_log(client_ctx, db_session):
     assert body["attributes"] == {}
 
     logs = (
-        (
-            await db_session.execute(
-                select(AuditLog).where(AuditLog.event_type == "user.registered")
-            )
-        )
+        (await db_session.execute(select(AuditLog).where(AuditLog.event_type == "user.registered")))
         .scalars()
         .all()
     )
@@ -182,11 +175,7 @@ async def test_login_success_sets_refresh_cookie_and_audit_log(client_ctx, db_se
     assert "refresh_token" in response.cookies
 
     logs = (
-        (
-            await db_session.execute(
-                select(AuditLog).where(AuditLog.event_type == "auth.login.success")
-            )
-        )
+        (await db_session.execute(select(AuditLog).where(AuditLog.event_type == "auth.login.success")))
         .scalars()
         .all()
     )
@@ -203,11 +192,7 @@ async def test_login_wrong_password_records_failure_audit(client_ctx, db_session
     assert response.status_code == 401
 
     logs = (
-        (
-            await db_session.execute(
-                select(AuditLog).where(AuditLog.event_type == "auth.login.failure")
-            )
-        )
+        (await db_session.execute(select(AuditLog).where(AuditLog.event_type == "auth.login.failure")))
         .scalars()
         .all()
     )
@@ -236,11 +221,7 @@ async def test_login_locks_account_after_max_attempts(client_ctx, db_session):
     assert "Retry-After" in response.headers
 
     logs = (
-        (
-            await db_session.execute(
-                select(AuditLog).where(AuditLog.event_type == "auth.login.locked")
-            )
-        )
+        (await db_session.execute(select(AuditLog).where(AuditLog.event_type == "auth.login.locked")))
         .scalars()
         .all()
     )
@@ -299,9 +280,7 @@ async def test_refresh_reuse_revokes_entire_family(client_ctx, db_session):
     logs = (
         (
             await db_session.execute(
-                select(AuditLog).where(
-                    AuditLog.event_type == "auth.refresh.reuse_detected"
-                )
+                select(AuditLog).where(AuditLog.event_type == "auth.refresh.reuse_detected")
             )
         )
         .scalars()
@@ -350,10 +329,9 @@ async def test_access_token_blacklisted_after_logout_rejected_by_get_current_use
     client_ctx,
 ):
     """Exercises get_current_user directly via a protected dependency override-free path."""
-    from fastapi import APIRouter, Depends
-
     from app.api.v1.dependencies import get_current_user
     from app.main import app as app_instance
+    from fastapi import APIRouter, Depends
 
     probe_router = APIRouter()
 
@@ -415,9 +393,7 @@ async def test_google_callback_new_identity_registers_user(
     assert "refresh_token" in response.cookies
 
     user = (
-        await db_session.execute(
-            select(User).where(User.email == "newgoogleuser@example.com")
-        )
+        await db_session.execute(select(User).where(User.email == "newgoogleuser@example.com"))
     ).scalar_one()
     assert user.google_subject == "google-subject-001"
     assert user.password_hash is None
@@ -425,9 +401,7 @@ async def test_google_callback_new_identity_registers_user(
     logs = (
         (
             await db_session.execute(
-                select(AuditLog).where(
-                    AuditLog.event_type == "auth.google_login.registered"
-                )
+                select(AuditLog).where(AuditLog.event_type == "auth.google_login.registered")
             )
         )
         .scalars()
@@ -463,23 +437,13 @@ async def test_google_callback_links_existing_verified_email_account(
     assert response.status_code == 200
 
     user = (
-        await db_session.execute(
-            select(User).where(User.email == "newgoogleuser@example.com")
-        )
+        await db_session.execute(select(User).where(User.email == "newgoogleuser@example.com"))
     ).scalar_one()
     assert user.google_subject == "google-subject-001"
-    assert (
-        user.password_hash is not None
-    )  # the original local credential survives linking
+    assert user.password_hash is not None  # the original local credential survives linking
 
     logs = (
-        (
-            await db_session.execute(
-                select(AuditLog).where(
-                    AuditLog.event_type == "auth.google_login.linked"
-                )
-            )
-        )
+        (await db_session.execute(select(AuditLog).where(AuditLog.event_type == "auth.google_login.linked")))
         .scalars()
         .all()
     )
@@ -502,9 +466,7 @@ async def test_google_callback_refuses_to_link_unverified_email(
     )
 
     state, nonce = await _start_google_login(client_ctx)
-    id_token = _sign_id_token(
-        private_key, claims_overrides={"nonce": nonce, "email_verified": False}
-    )
+    id_token = _sign_id_token(private_key, claims_overrides={"nonce": nonce, "email_verified": False})
 
     _mock_jwks(respx, google_jwks)
     _mock_token_endpoint(respx, id_token)
@@ -516,9 +478,7 @@ async def test_google_callback_refuses_to_link_unverified_email(
     assert response.status_code == 401
 
     user = (
-        await db_session.execute(
-            select(User).where(User.email == "newgoogleuser@example.com")
-        )
+        await db_session.execute(select(User).where(User.email == "newgoogleuser@example.com"))
     ).scalar_one()
     assert user.google_subject is None
 
@@ -526,8 +486,7 @@ async def test_google_callback_refuses_to_link_unverified_email(
         (
             await db_session.execute(
                 select(AuditLog).where(
-                    AuditLog.event_type
-                    == "auth.google_login.link_refused_unverified_email"
+                    AuditLog.event_type == "auth.google_login.link_refused_unverified_email"
                 )
             )
         )
@@ -538,15 +497,11 @@ async def test_google_callback_refuses_to_link_unverified_email(
 
 
 @respx.mock
-async def test_google_callback_missing_email_claim_rejected(
-    client_ctx, google_keypair, google_jwks
-):
+async def test_google_callback_missing_email_claim_rejected(client_ctx, google_keypair, google_jwks):
     """Schema validation edge case: a structurally-valid-but-incomplete ID token."""
     private_key, _ = google_keypair
     state, nonce = await _start_google_login(client_ctx)
-    id_token = _sign_id_token(
-        private_key, claims_overrides={"nonce": nonce}, omit=("email",)
-    )
+    id_token = _sign_id_token(private_key, claims_overrides={"nonce": nonce}, omit=("email",))
 
     _mock_jwks(respx, google_jwks)
     _mock_token_endpoint(respx, id_token)
@@ -559,14 +514,10 @@ async def test_google_callback_missing_email_claim_rejected(
 
 
 @respx.mock
-async def test_google_callback_nonce_mismatch_rejected(
-    client_ctx, google_keypair, google_jwks
-):
+async def test_google_callback_nonce_mismatch_rejected(client_ctx, google_keypair, google_jwks):
     private_key, _ = google_keypair
     state, _real_nonce = await _start_google_login(client_ctx)
-    id_token = _sign_id_token(
-        private_key, claims_overrides={"nonce": "a-completely-different-nonce"}
-    )
+    id_token = _sign_id_token(private_key, claims_overrides={"nonce": "a-completely-different-nonce"})
 
     _mock_jwks(respx, google_jwks)
     _mock_token_endpoint(respx, id_token)
@@ -587,9 +538,7 @@ async def test_google_callback_unknown_state_rejected(client_ctx):
 
 
 @respx.mock
-async def test_google_callback_state_replay_rejected(
-    client_ctx, google_keypair, google_jwks
-):
+async def test_google_callback_state_replay_rejected(client_ctx, google_keypair, google_jwks):
     """A state token is single-use — the second callback with the same state must fail
     even though the first one succeeded."""
     private_key, _ = google_keypair

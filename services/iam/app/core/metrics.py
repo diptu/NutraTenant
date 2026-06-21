@@ -41,9 +41,7 @@ def _route_template(request: Request) -> str:
     return route.path if route is not None else request.url.path
 
 
-def record_request(
-    method: str, path: str, status_code: int, duration_seconds: float
-) -> None:
+def record_request(method: str, path: str, status_code: int, duration_seconds: float) -> None:
     _request_counts[(method, path, str(status_code))] += 1
     key = (method, path)
     _duration_sum[key] += duration_seconds
@@ -69,13 +67,10 @@ def render_metrics() -> str:
     ]
     for (method, path, status_code), count in sorted(_request_counts.items()):
         lines.append(
-            f'iam_http_requests_total{{method="{method}",path="{path}",'
-            f'status_code="{status_code}"}} {count}'
+            f'iam_http_requests_total{{method="{method}",path="{path}",status_code="{status_code}"}} {count}'
         )
 
-    lines.append(
-        "# HELP iam_http_request_duration_seconds HTTP request duration in seconds."
-    )
+    lines.append("# HELP iam_http_request_duration_seconds HTTP request duration in seconds.")
     lines.append("# TYPE iam_http_request_duration_seconds histogram")
     for method, path in sorted(_duration_count):
         cumulative = 0
@@ -105,7 +100,5 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         start = time.perf_counter()
         response = await call_next(request)
         duration = time.perf_counter() - start
-        record_request(
-            request.method, _route_template(request), response.status_code, duration
-        )
+        record_request(request.method, _route_template(request), response.status_code, duration)
         return response

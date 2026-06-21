@@ -22,16 +22,12 @@ class UserService:
             raise UserNotFoundError(f"No user with id '{user_id}'")
         return user
 
-    async def search(
-        self, query: str | None, *, limit: int = 50, offset: int = 0
-    ) -> list[User]:
+    async def search(self, query: str | None, *, limit: int = 50, offset: int = 0) -> list[User]:
         if query:
             return await self._users.search(query, limit=limit)
         return await self._users.list_all(limit=limit, offset=offset)
 
-    async def update_profile(
-        self, user_id: uuid.UUID, *, full_name: str | None
-    ) -> User:
+    async def update_profile(self, user_id: uuid.UUID, *, full_name: str | None) -> User:
         user = await self.get_by_id(user_id)
         user.full_name = full_name
         user.updated_at = datetime.now(UTC)

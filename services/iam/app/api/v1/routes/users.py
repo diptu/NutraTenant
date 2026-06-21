@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query, status
-
 from app.api.v1.dependencies import (
     get_current_user,
     get_user_service,
@@ -19,6 +17,7 @@ from app.api.v1.schemas.user import (
 from app.domain.exceptions import ForbiddenError
 from app.infrastructure.db.models.user import User
 from app.services.user_service import UserService
+from fastapi import APIRouter, Depends, Query, status
 
 router = APIRouter(prefix="/users", tags=["users"])
 

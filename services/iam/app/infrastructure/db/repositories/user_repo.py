@@ -2,9 +2,6 @@
 
 import uuid
 
-from sqlalchemy import or_, select
-from sqlalchemy.orm import selectinload
-
 from app.infrastructure.db.models.associations import (
     RolePermission,
     UserOrganizationRole,
@@ -12,6 +9,8 @@ from app.infrastructure.db.models.associations import (
 from app.infrastructure.db.models.role import Role
 from app.infrastructure.db.models.user import User
 from app.infrastructure.db.repositories.base_repository import BaseRepository
+from sqlalchemy import or_, select
+from sqlalchemy.orm import selectinload
 
 
 class UserRepository(BaseRepository[User]):
@@ -31,11 +30,7 @@ class UserRepository(BaseRepository[User]):
 
     async def search(self, query: str, *, limit: int = 50) -> list[User]:
         pattern = f"%{query.lower()}%"
-        stmt = (
-            select(User)
-            .where(or_(User.email.ilike(pattern), User.full_name.ilike(pattern)))
-            .limit(limit)
-        )
+        stmt = select(User).where(or_(User.email.ilike(pattern), User.full_name.ilike(pattern))).limit(limit)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 

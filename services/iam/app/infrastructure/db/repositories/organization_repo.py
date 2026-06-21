@@ -2,9 +2,6 @@
 
 import uuid
 
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
-
 from app.infrastructure.db.models.associations import (
     RolePermission,
     UserOrganizationRole,
@@ -12,6 +9,8 @@ from app.infrastructure.db.models.associations import (
 from app.infrastructure.db.models.organization import Organization
 from app.infrastructure.db.models.role import Role
 from app.infrastructure.db.repositories.base_repository import BaseRepository
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 
 class OrganizationRepository(BaseRepository[Organization]):
@@ -56,9 +55,7 @@ class OrganizationRepository(BaseRepository[Organization]):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_members(
-        self, organization_id: uuid.UUID
-    ) -> list[UserOrganizationRole]:
+    async def list_members(self, organization_id: uuid.UUID) -> list[UserOrganizationRole]:
         stmt = (
             select(UserOrganizationRole)
             .where(UserOrganizationRole.organization_id == organization_id)

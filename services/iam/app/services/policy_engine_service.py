@@ -136,9 +136,7 @@ class PolicyEngineService:
             log_id=log_id,
         )
 
-    def _match_one(
-        self, policy: Any, eval_context: dict[str, Any]
-    ) -> PolicyMatchResult:
+    def _match_one(self, policy: Any, eval_context: dict[str, Any]) -> PolicyMatchResult:
         if policy.conditions is None:
             return PolicyMatchResult(
                 policy_id=policy.id,

@@ -17,11 +17,10 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from app.core.config import Settings, get_settings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-
-from app.core.config import Settings, get_settings
 
 
 def extract_client_ip(request: Request) -> str:
@@ -78,6 +77,4 @@ class ContextExtractionMiddleware(BaseHTTPMiddleware):
 
 
 def get_request_context(request: Request) -> dict[str, Any]:
-    return getattr(request.state, "context", None) or build_context(
-        request, get_settings()
-    )
+    return getattr(request.state, "context", None) or build_context(request, get_settings())

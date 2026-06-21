@@ -27,11 +27,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # The conventional Postgres-generated name for a single-column UNIQUE
-    # declared via `unique=True` on `op.create_table` (migration 0001 did
-    # not name it explicitly).
-    op.drop_constraint("roles_name_key", "roles", type_="unique")
+    # Named per app/infrastructure/db/base.py's explicit naming convention
+    # (`uq_%(table_name)s_%(column_0_name)s`), not Postgres' own
+    # `<table>_<column>_key` default — that convention applies even though
+    # migration 0001 declared this via plain `unique=True`.
+    op.drop_constraint("uq_roles_name", "roles", type_="unique")
 
 
 def downgrade() -> None:
-    op.create_unique_constraint("roles_name_key", "roles", ["name"])
+    op.create_unique_constraint("uq_roles_name", "roles", ["name"])

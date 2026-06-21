@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, status
-
 from app.api.v1.dependencies import (
     get_current_user,
     get_policy_engine_service,
@@ -32,6 +30,7 @@ from app.core.context_middleware import get_request_context
 from app.infrastructure.db.models.user import User
 from app.services.policy_engine_service import PolicyEngineService
 from app.services.policy_service import PolicyService
+from fastapi import APIRouter, Depends, status
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 

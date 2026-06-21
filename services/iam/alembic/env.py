@@ -3,9 +3,6 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
-from sqlalchemy import pool
-from sqlalchemy.ext.asyncio import create_async_engine
-
 # Import all models so their tables are registered in Base.metadata.
 # NOTE: this only covers the auth/RBAC tables this service currently has
 # ORM models for (see app/infrastructure/db/models/__init__.py). The
@@ -17,6 +14,8 @@ import app.infrastructure.db.models  # noqa: F401
 from alembic import context
 from app.core.config import get_settings
 from app.infrastructure.db.base import Base
+from sqlalchemy import pool
+from sqlalchemy.ext.asyncio import create_async_engine
 
 config = context.config
 
