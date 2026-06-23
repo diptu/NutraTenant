@@ -1,6 +1,10 @@
 """Tenant resolution at /login: single-org auto-select, multi-org 409,
-explicit tenant_id selection/rejection, and the response/JWT shape that
-carries tenant_id + role for downstream RBAC/ABAC evaluation.
+explicit tenant_id selection/rejection, and the response shape carrying
+tenant_id + role for downstream RBAC/ABAC evaluation. The access token
+itself carries neither (resolved dynamically per-request from the
+session instead — see app.modules.auth.dependencies.get_current_tenant_slug),
+so the *effective* tenant/role for a session is asserted via GET /users/me
+rather than by decoding the JWT.
 """
 
 from __future__ import annotations
@@ -9,7 +13,7 @@ from uuid import UUID
 
 import jwt
 import pytest
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from sqlalchemy import select
 
 
@@ -84,16 +88,18 @@ class TestSingleOrganization:
         assert resp.status_code == 200, resp.text
         body = resp.json()
 
-        assert body["user"]["tenant"] == {
-            "id": org["id"],
-            "tenant_id": "solo-org",
-            "name": "Solo Org",
-        }
-        assert body["user"]["role"]["name"] == "Owner"
+        # tenant_id (org slug) and role name aren't repeated in the login
+        # response — confirmed below via GET /users/me, which resolves the
+        # session's effective tenant/role dynamically rather than off the
+        # access token itself.
+        assert body["user"]["tenant"] == {"id": org["id"], "name": "Solo Org"}
+        assert set(body["user"]["role"].keys()) == {"id"}
+        assert body["user"]["role"]["id"]
 
-        claims = _unverified_claims(body["access_token"])
-        assert claims["tenant_id"] == "solo-org"
-        assert claims["role"] == "Owner"
+        me = await client.get("/api/v1/users/me", headers=_auth(body["access_token"]))
+        assert me.status_code == 200, me.text
+        assert me.json()["tenant"]["tenant_id"] == "solo-org"
+        assert me.json()["role"]["name"] == "Owner"
 
     @pytest.mark.anyio
     async def test_session_and_links_are_populated(self, client):
@@ -162,8 +168,12 @@ class TestMultipleOrganizations:
         resp = await _login(client, "multi2@test.com", tenant_id=org_b["slug"])
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["user"]["tenant"]["tenant_id"] == "org-b2"
-        assert body["user"]["role"]["name"] == "Member"
+        assert body["user"]["tenant"]["id"] == org_b["id"]
+
+        me = await client.get("/api/v1/users/me", headers=_auth(body["access_token"]))
+        assert me.status_code == 200, me.text
+        assert me.json()["tenant"]["tenant_id"] == "org-b2"
+        assert me.json()["role"]["name"] == "Member"
 
     @pytest.mark.anyio
     async def test_login_with_tenant_id_not_a_member_of_returns_403(self, client, db_session):

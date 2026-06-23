@@ -35,3 +35,9 @@ async def send_tenant_invite_email(*, to: str, invite_token: str, tenant_name: s
         tenant_name,
         to,
     )
+
+
+async def send_verification_email(*, to: str, verification_token: str) -> None:
+    """Post-registration email-verification link (token omitted from logs,
+    same as the other stubs here)."""
+    logger.info("STUB email: verification link for %s (token omitted from logs)", to)

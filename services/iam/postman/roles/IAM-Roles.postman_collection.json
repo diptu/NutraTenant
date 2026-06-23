@@ -1,0 +1,1250 @@
+{
+  "info": {
+    "name": "IAM Service — Role Management API",
+    "_postman_id": "f6d4b8a3-1e5c-4a2f-9d3e-iam-roles-0001",
+    "description": "Exercises every /api/v1/roles endpoint in app/api/v1/routes/roles.py, implemented from Role_API_Specification_Extended.md, plus the pre-existing global (platform-wide) role-assignment contract it didn't touch. Sibling to ../auth, ../users, ../tenants, and ../permissions — kept separate so each can be run/maintained independently.\n\n**Two role systems live under the same /roles prefix:**\n1. Tenant-scoped custom roles (this spec) — POST/GET/PUT/DELETE /roles, .../permissions, .../users, .../clone, .../activate, .../deactivate. A role's tenant is resolved from the caller's *session* (`claims.tenant_id`) or an explicit `tenant_id` in the request/query — there's no `organization_id` field anymore.\n2. The pre-existing global (platform-wide) catalog — POST /roles/seed, POST/DELETE /roles/{role_id}/assignments, GET /roles/assignments/{user_id} — unaffected by this spec, kept in its original bare-object shape, used by every sibling collection's Setup folder.\n\n**Notes on the implementation vs. the spec doc:**\n- `slug` is the wire name; the stored column is still named `code` internally (unrelated to this implementation).\n- An explicit `tenant_id` (request body for create, query param for list) lets *any* caller target a tenant other than their session's — necessary because a session's `claims.tenant_id` is only set at login time, and an owner's token often predates the organization they since created/joined. The actual security gate is the require-owner-or-superuser check applied afterward, not session-matching.\n- `POST /roles/{role_id}/users` (bulk org-membership role assignment) only works on tenant-scoped roles — global roles 403 there; use POST /roles/{role_id}/assignments (the pre-existing mechanism) for those instead.\n- Create's response enriches the spec's example with the full Common Role Object (permissions_count/users_count/created_by/updated_by/timestamps).\n\n**Prerequisites:**\n1. Run the service: `uv run uvicorn app.main:app --reload --port 8000`.\n2. Create a superuser: `uv run python scripts/create_superuser.py admin@example.com ChangeMe123!` (update `superuser_email`/`superuser_password` below if different).\n\n**Auto token handling:** same pattern as the sibling collections — Login Test scripts capture tokens per actor into collection variables, and a collection-level pre-request script auto-refreshes a near-expired token via POST /auth/refresh before any other request runs.\n\n**Run order matters** — later folders assume earlier ones ran (Setup creates a tenant-bound owner + member; Permissions/Users/Clone folders all act on the role created in folder 1).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Collection-level: auto-detect a near-expired/missing access token for",
+          "// the current actor(s) and silently refresh it via POST /auth/refresh",
+          "// before the request runs.",
+          "function base64UrlDecode(input) {",
+          "    input = input.replace(/-/g, '+').replace(/_/g, '/');",
+          "    while (input.length % 4) { input += '='; }",
+          "    return decodeURIComponent(",
+          "        atob(input).split('').map(function (c) {",
+          "            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);",
+          "        }).join('')",
+          "    );",
+          "}",
+          "",
+          "function isExpiredOrMissing(token) {",
+          "    if (!token) return true;",
+          "    var parts = token.split('.');",
+          "    if (parts.length !== 3) return true;",
+          "    try {",
+          "        var payload = JSON.parse(base64UrlDecode(parts[1]));",
+          "        return !payload.exp || (payload.exp * 1000) < (Date.now() + 5000);",
+          "    } catch (e) {",
+          "        return true;",
+          "    }",
+          "}",
+          "",
+          "function refreshActor(actor, cb) {",
+          "    var accessVar = actor + '_access_token';",
+          "    var refreshVar = actor + '_refresh_token';",
+          "    var accessToken = pm.collectionVariables.get(accessVar);",
+          "    var refreshToken = pm.collectionVariables.get(refreshVar);",
+          "",
+          "    if (!refreshToken || !isExpiredOrMissing(accessToken)) {",
+          "        return cb();",
+          "    }",
+          "",
+          "    pm.sendRequest({",
+          "        url: pm.collectionVariables.get('base_url') + '/api/v1/auth/refresh',",
+          "        method: 'POST',",
+          "        header: { 'Content-Type': 'application/json' },",
+          "        body: { mode: 'raw', raw: JSON.stringify({ refresh_token: refreshToken }) }",
+          "    }, function (err, res) {",
+          "        if (!err && res && res.code === 200) {",
+          "            var json = res.json();",
+          "            pm.collectionVariables.set(accessVar, json.access_token);",
+          "            pm.collectionVariables.set(refreshVar, json.refresh_token);",
+          "            console.log('[auto-refresh] ' + actor + ' access token refreshed');",
+          "        } else {",
+          "            console.log('[auto-refresh] ' + actor + ' refresh skipped/failed (continuing with existing token)');",
+          "        }",
+          "        cb();",
+          "    });",
+          "}",
+          "",
+          "var requestName = pm.info.requestName || '';",
+          "if (!/^(Login|Register|Refresh)/i.test(requestName)) {",
+          "    refreshActor('superuser', function () {",
+          "        refreshActor('owner', function () {",
+          "            refreshActor('member', function () {});",
+          "        });",
+          "    });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "superuser_email", "value": "admin@example.com" },
+    { "key": "superuser_password", "value": "ChangeMe123!" },
+    { "key": "superuser_access_token", "value": "" },
+    { "key": "superuser_refresh_token", "value": "" },
+    { "key": "owner_email", "value": "" },
+    { "key": "owner_password", "value": "" },
+    { "key": "owner_id", "value": "" },
+    { "key": "owner_access_token", "value": "" },
+    { "key": "owner_refresh_token", "value": "" },
+    { "key": "member_email", "value": "" },
+    { "key": "member_password", "value": "" },
+    { "key": "member_id", "value": "" },
+    { "key": "member_access_token", "value": "" },
+    { "key": "member_refresh_token", "value": "" },
+    { "key": "org_slug", "value": "" },
+    { "key": "organization_id", "value": "" },
+    { "key": "seeded_permission_codes", "value": "" },
+    { "key": "role_id", "value": "" },
+    { "key": "role_slug", "value": "" },
+    { "key": "throwaway_role_id", "value": "" },
+    { "key": "guest_role_id", "value": "" },
+    { "key": "override_role_id", "value": "" },
+    { "key": "seed_resource", "value": "" },
+    { "key": "clone_slug", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Setup",
+      "item": [
+        {
+          "name": "Login Superuser",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Superuser login succeeded', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('superuser_access_token', body.access_token);",
+                  "pm.collectionVariables.set('superuser_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{superuser_email}}\",\n  \"password\": \"{{superuser_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Requires the account named by superuser_email/superuser_password to already exist with is_superuser=true — see scripts/create_superuser.py. Deliberately stays without a tenant context for the whole collection, so it can later demonstrate the tenant_id override (see '1. Create & Read' > Create Role — Superuser Tenant Override)."
+          }
+        },
+        {
+          "name": "Register Owner",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('owner_email', 'role-owner.' + ts + '@example.com');",
+                  "pm.collectionVariables.set('owner_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Registered', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('owner_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"{{owner_password}}\",\n  \"full_name\": \"Role Owner\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            }
+          }
+        },
+        {
+          "name": "Create Organization (superuser)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('org_slug', 'roleapi-' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('organization_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Role API Test Org\",\n  \"slug\": \"{{org_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations"]
+            }
+          }
+        },
+        {
+          "name": "Add Owner To Organization (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{owner_id}}\",\n  \"role_code\": \"owner\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_id}}/members",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_id}}", "members"]
+            }
+          }
+        },
+        {
+          "name": "Login Owner (tenant-bound)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, bound to org', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    // tenant_id isn't duplicated in body.user.tenant — it's already",
+                  "    // the access token's own tenant_id claim.",
+                  "    var claims = JSON.parse(atob(body.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                  "    pm.expect(claims.tenant_id).to.equal(pm.collectionVariables.get('org_slug'));",
+                  "});",
+                  "pm.collectionVariables.set('owner_access_token', body.access_token);",
+                  "pm.collectionVariables.set('owner_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"{{owner_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Owner belongs to exactly one organization, so the session auto-binds claims.tenant_id — every Role CRUD request below can then omit tenant_id entirely."
+          }
+        },
+        {
+          "name": "Register Member",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('member_email', 'role-member.' + ts + '@example.com');",
+                  "pm.collectionVariables.set('member_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Registered', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('member_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\",\n  \"full_name\": \"Role Member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            }
+          }
+        },
+        {
+          "name": "Add Member To Organization (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{member_id}}\",\n  \"role_code\": \"member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_id}}/members",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_id}}", "members"]
+            }
+          }
+        },
+        {
+          "name": "Login Member (tenant-bound)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK', function () { pm.expect(pm.response.code).to.equal(200); });",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "Seed Permission Catalog (superuser)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('seed_resource', 'roleapi' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.expect(pm.response.code).to.equal(200); });",
+                  "pm.collectionVariables.set('seeded_permission_codes', JSON.stringify(pm.response.json().created_permissions));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resources\": [\"{{seed_resource}}\"]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/seed",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "seed"]
+            },
+            "description": "Provisions {resource}:create/read/update/delete — used to attach real permissions to the role created below. seeded_permission_codes is stored as a JSON-encoded array string (Postman collection variables are strings only)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Create & Read",
+      "item": [
+        {
+          "name": "Create Role",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('role_slug', 'project_manager_' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "var codes = JSON.parse(pm.collectionVariables.get('seeded_permission_codes'));",
+                  "pm.test('201 Created, full Common Role Object', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    pm.expect(body.message).to.equal('Role created successfully');",
+                  "    var r = body.role;",
+                  "    pm.expect(r.slug).to.equal(pm.collectionVariables.get('role_slug'));",
+                  "    pm.expect(r.priority).to.equal(50);",
+                  "    pm.expect(r.permissions_count).to.equal(codes.length);",
+                  "    pm.expect(r.users_count).to.equal(0);",
+                  "    pm.expect(r.tenant_id).to.equal(pm.collectionVariables.get('org_slug'));",
+                  "    pm.expect(r.created_by).to.equal(pm.collectionVariables.get('owner_id'));",
+                  "    pm.expect(r.is_system).to.equal(false);",
+                  "    pm.expect(r.is_active).to.equal(true);",
+                  "});",
+                  "pm.collectionVariables.set('role_id', body.role.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Project Manager\",\n  \"slug\": \"{{role_slug}}\",\n  \"description\": \"Can manage projects and team members\",\n  \"priority\": 50,\n  \"permissions\": {{seeded_permission_codes}}\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles"]
+            },
+            "description": "No tenant_id needed — owner_access_token's session is already bound to org_slug (see Setup > Login Owner)."
+          }
+        },
+        {
+          "name": "Create Role — Duplicate Slug (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('409 Conflict', function () { pm.response.to.have.status(409); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Project Manager Again\",\n  \"slug\": \"{{role_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles"]
+            }
+          }
+        },
+        {
+          "name": "Create Role — Forbidden For Non-Owner Member",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('403 Forbidden', function () { pm.response.to.have.status(403); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{member_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Shadow Role\",\n  \"slug\": \"shadow_role_{{$timestamp}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles"]
+            },
+            "description": "A plain member (not the org's owner) can't create roles in their tenant, even though their session is bound to it."
+          }
+        },
+        {
+          "name": "Create Role — Superuser Tenant Override",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created, targets the named tenant despite no session context', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    pm.expect(body.role.tenant_id).to.equal(pm.collectionVariables.get('org_slug'));",
+                  "});",
+                  "pm.collectionVariables.set('override_role_id', body.role.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Ops\",\n  \"slug\": \"ops_role_{{$timestamp}}\",\n  \"tenant_id\": \"{{org_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles"]
+            },
+            "description": "superuser_access_token has no tenant context at all (see Setup > Login Superuser) — the explicit tenant_id field lets it target this org anyway. Without it, omitting tenant_id here would create a *global* role instead (superuser-only, but a different role entirely)."
+          }
+        },
+        {
+          "name": "List Roles",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, pagination envelope', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.page).to.equal(1);",
+                  "    pm.expect(body.page_size).to.equal(20);",
+                  "    pm.expect(body.roles).to.be.an('array');",
+                  "    pm.expect(body.roles.some(function (r) { return r.id === pm.collectionVariables.get('role_id'); })).to.equal(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles?page=1&page_size=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "page_size", "value": "20" }
+              ]
+            },
+            "description": "owner_access_token's session is tenant-bound, so no tenant_id query param is needed here."
+          }
+        },
+        {
+          "name": "List Roles — Search Filter",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, only the matching role', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.total).to.equal(1);",
+                  "    pm.expect(body.roles[0].id).to.equal(pm.collectionVariables.get('role_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles?search=Project Manager",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles"],
+              "query": [{ "key": "search", "value": "Project Manager" }]
+            }
+          }
+        },
+        {
+          "name": "Get Role By ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().role.id).to.equal(pm.collectionVariables.get('role_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}"]
+            },
+            "description": "Reads (unlike create/update/delete) are open to any authenticated user, not just the owner — a plain member's token works here."
+          }
+        },
+        {
+          "name": "Get Role By ID — Unknown (expect 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('404 Not Found', function () { pm.response.to.have.status(404); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/00000000-0000-0000-0000-000000000000",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "00000000-0000-0000-0000-000000000000"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Update & Delete",
+      "item": [
+        {
+          "name": "Update Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, fields updated', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.message).to.equal('Role updated successfully');",
+                  "    pm.expect(body.role.description).to.equal('Updated description');",
+                  "    pm.expect(body.role.priority).to.equal(75);",
+                  "    pm.expect(body.role.updated_by).to.equal(pm.collectionVariables.get('owner_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"description\": \"Updated description\",\n  \"priority\": 75,\n  \"is_active\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Create Throwaway Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('throwaway_role_id', pm.response.json().role.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Throwaway\",\n  \"slug\": \"throwaway_{{$timestamp}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles"]
+            }
+          }
+        },
+        {
+          "name": "Delete Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ success: true, message: 'Role deleted successfully' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{throwaway_role_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{throwaway_role_id}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Permissions",
+      "item": [
+        {
+          "name": "Get Role Permissions",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "var codes = JSON.parse(pm.collectionVariables.get('seeded_permission_codes'));",
+                  "pm.test('200 OK, the permissions granted at creation', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.role_id).to.equal(pm.collectionVariables.get('role_id'));",
+                  "    var names = body.permissions.map(function (p) { return p.name; });",
+                  "    codes.forEach(function (c) { pm.expect(names).to.include(c); });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}/permissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}", "permissions"]
+            }
+          }
+        },
+        {
+          "name": "Remove Permissions From Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ success: true, message: 'Permissions removed successfully' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"permissions\": {{seeded_permission_codes}}\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}/permissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}", "permissions"]
+            },
+            "description": "Bulk removal by permission code — distinct from the older per-permission-id mechanism this replaces."
+          }
+        },
+        {
+          "name": "Assign Permissions To Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "var codes = JSON.parse(pm.collectionVariables.get('seeded_permission_codes'));",
+                  "pm.test('200 OK', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.success).to.equal(true);",
+                  "    pm.expect(body.role_id).to.equal(pm.collectionVariables.get('role_id'));",
+                  "    pm.expect(body.permissions_count).to.equal(codes.length);",
+                  "    pm.expect(body.message).to.equal('Permissions assigned successfully');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"permissions\": {{seeded_permission_codes}}\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}/permissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}", "permissions"]
+            },
+            "description": "Re-grants what 'Remove Permissions From Role' just revoked, restoring the role to its original state for the folders below."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Users",
+      "item": [
+        {
+          "name": "Assign Users To Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ success: true, assigned_users: 1 });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_ids\": [\"{{member_id}}\"]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}/users",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}", "users"]
+            },
+            "description": "Switches member's existing org membership to this role — member must already belong to the tenant (see Setup > Add Member To Organization)."
+          }
+        },
+        {
+          "name": "Get Role Users",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, member is listed', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.role_id).to.equal(pm.collectionVariables.get('role_id'));",
+                  "    pm.expect(body.total).to.equal(1);",
+                  "    pm.expect(body.users[0].id).to.equal(pm.collectionVariables.get('member_id'));",
+                  "    pm.expect(body.users[0].email).to.equal(pm.collectionVariables.get('member_email'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}/users",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}", "users"]
+            }
+          }
+        },
+        {
+          "name": "Assign Users To Role — Rejected For Global Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('403 Forbidden', function () { pm.response.to.have.status(403); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_ids\": [\"{{member_id}}\"]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{guest_role_id}}/users",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{guest_role_id}}", "users"]
+            },
+            "description": "guest_role_id comes from '6. Global Role Assignment' > Seed Global Roles — run that folder first, or this request 404s instead of 403 (guest_role_id would be empty)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Clone, Activate & Deactivate",
+      "item": [
+        {
+          "name": "Clone Role",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('clone_slug', 'project_manager_v2_' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created, copies permissions/priority', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    pm.expect(body.message).to.equal('Role cloned successfully');",
+                  "    pm.expect(body.role.id).to.not.equal(pm.collectionVariables.get('role_id'));",
+                  "    pm.expect(body.role.slug).to.equal(pm.collectionVariables.get('clone_slug'));",
+                  "    pm.expect(body.role.priority).to.equal(75);",
+                  "    pm.expect(body.role.permissions_count).to.be.above(0);",
+                  "    pm.expect(body.role.tenant_id).to.equal(pm.collectionVariables.get('org_slug'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Project Manager V2\",\n  \"slug\": \"{{clone_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}/clone",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}", "clone"]
+            }
+          }
+        },
+        {
+          "name": "Deactivate Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, INACTIVE', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ success: true, status: 'INACTIVE' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}/deactivate",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}", "deactivate"]
+            }
+          }
+        },
+        {
+          "name": "Activate Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, ACTIVE', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ success: true, status: 'ACTIVE' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{role_id}}/activate",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{role_id}}", "activate"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Global Role Assignment (pre-existing, unchanged)",
+      "description": "Not part of Role_API_Specification_Extended.md — the platform-wide user_roles mechanism this spec didn't touch, used by every sibling collection's Setup folder.",
+      "item": [
+        {
+          "name": "Seed Global Roles (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.expect(pm.response.code).to.equal(200); });",
+                  "var guest = pm.response.json().find(function (r) { return r.code === 'guest'; });",
+                  "pm.collectionVariables.set('guest_role_id', guest.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/seed",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "seed"]
+            }
+          }
+        },
+        {
+          "name": "Assign Global Role To User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('201 Created', function () { pm.response.to.have.status(201); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{member_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{guest_role_id}}/assignments",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{guest_role_id}}", "assignments"]
+            }
+          }
+        },
+        {
+          "name": "List User's Role Assignments",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, includes guest', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body.map(function (a) { return a.role_code; })).to.include('guest');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/assignments/{{member_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "assignments", "{{member_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Revoke Global Role From User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('204 No Content', function () { pm.response.to.have.status(204); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/{{guest_role_id}}/assignments/{{member_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "{{guest_role_id}}", "assignments", "{{member_id}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Cleanup",
+      "item": [
+        {
+          "name": "Delete Organization (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('204 No Content', function () { pm.response.to.have.status(204); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_id}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -20,7 +20,8 @@ from typing import Any
 
 import jwt
 from app.core.config import get_settings
-from app.domain.exceptions import ForbiddenError, InvalidTokenError
+from app.modules.auth.exceptions import InvalidTokenError
+from app.shared.exceptions.base import ForbiddenError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response

@@ -20,7 +20,7 @@ import uuid
 from uuid import UUID
 
 import pytest
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from sqlalchemy import select
 
 # ---------------------------------------------------------------------------

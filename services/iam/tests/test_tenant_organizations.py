@@ -1,5 +1,5 @@
 """Unit tests for the new Tenant entity and its many-to-many link to
-Organization (see app/services/tenant_service.py).
+Organization (see app/modules/tenants/service.py).
 
 This Tenant is additive and currently has no HTTP surface: the pre-existing
 "tenant" vocabulary used by the API (Organization.slug, the `tenant_id`
@@ -14,17 +14,17 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from app.domain.exceptions import (
-    OrganizationNotFoundError,
+from app.modules.organizations.exceptions import OrganizationNotFoundError
+from app.modules.organizations.models import Organization
+from app.modules.organizations.service import OrganizationService
+from app.modules.tenants.exceptions import (
     OrganizationTenantLinkAlreadyExistsError,
     OrganizationTenantLinkNotFoundError,
     TenantAlreadyExistsError,
     TenantNotFoundError,
 )
-from app.infrastructure.db.models.organization import Organization
-from app.infrastructure.db.models.user import User
-from app.services.organization_service import OrganizationService
-from app.services.tenant_service import TenantService
+from app.modules.tenants.service import TenantService
+from app.modules.users.models import User
 
 pytestmark = pytest.mark.anyio
 

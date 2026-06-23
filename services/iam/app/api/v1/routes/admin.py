@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from app.api.v1.dependencies import get_auth_service, require_superuser
 from app.api.v1.schemas.admin import AdminCreateUserRequest, AdminCreateUserResponse
-from app.infrastructure.db.models.user import User
-from app.services.auth_service import AuthService
+from app.modules.auth.service import AuthService
+from app.modules.users.models import User
 from fastapi import APIRouter, Depends, status
 
 router = APIRouter(prefix="/admin", tags=["admin"])

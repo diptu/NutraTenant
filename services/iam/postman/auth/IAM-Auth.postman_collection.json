@@ -1,0 +1,1270 @@
+{
+  "info": {
+    "name": "IAM Service — Auth API",
+    "_postman_id": "c3a1f9e0-7d2b-4a55-9c6e-iam-auth-0001",
+    "description": "Exercises every /api/v1/auth endpoint in app/api/v1/routes/auth.py, plus the org scaffolding needed to reach switch-tenant/accept-invite. Sibling to the ../users and ../tenants collections — kept separate so each can be run/maintained independently.\n\n**Known gaps vs. the Authentication API Specification doc (flagged so they don't look like collection bugs):**\n- The spec's MFA-verify step is `POST /auth/verify-mfa` with `{challenge_token, otp}`. The real route is `POST /auth/mfa/login-verify` with `{mfa_challenge_token, code}` — this collection uses the real one.\n- `POST /auth/logout`, `/change-password`, and `/reset-password` return `204 No Content` here, not the spec's `{success, message}` body.\n- `POST /auth/login` now accepts the spec's optional `client`/`context` metadata blocks (every field within them optional too) — `client.device_name`/`browser`/`platform` override the User-Agent-derived `session.device`; `context` is accepted but otherwise informational only (never trusted over the real connection IP). `POST /auth/register` still doesn't accept them, nor `confirm_password` — extra fields there are silently ignored by FastAPI.\n- The real JWT access-token payload carries `sub/type/tenant_id/role/is_superuser/iat/exp/jti` — no `permissions` array baked into the token itself (permissions are resolved server-side per-request). The 'Login — Success' request's Test script decodes and asserts the real claim set.\n- `tenant_id` (org slug) and `role` (display name) are deliberately **not** duplicated in the login response body — `body.user.tenant`/`body.user.role` only carry `id`/`name` fields the token itself doesn't have; the same values on the token are read by decoding it (see 'Login Primary User (tenant A)' and 'Switch Tenant'). `POST /auth/switch-tenant`'s response is just `{access_token}` for the same reason. `is_superuser` is JWT-only too — never in any response body (register's Common User Object is the one exception, by design).\n- `forgot-password`'s `reset_token`, `register`'s `verification_token`, and an organization invitation's `invitation_token` are only ever returned in the HTTP response when the server runs with `DEBUG=true` (there's no email/notification provider wired up). Without it, '1. Registration' > Verify Email, '4. Password Management' > Reset Password, and '5. Tenant Switching & Invitations' > Accept Invite degrade gracefully (tolerant assertions + a console note) instead of failing the run.\n\n**Prerequisites (same as the ../users collection):**\n1. Run the service: `uv run uvicorn app.main:app --reload --port 8000`.\n2. Create a superuser: `uv run python scripts/create_superuser.py admin@example.com ChangeMe123!` (update `superuser_email`/`superuser_password` below if different).\n3. Optional but recommended for full coverage: set `DEBUG=true` in `services/iam/.env` before starting the server, so reset_token/verification_token/invitation_token are revealed (see gaps above).\n\n**Auto token handling:** identical pattern to the ../users collection — Login/Register Test scripts capture `access_token`/`refresh_token` per actor into collection variables, and a collection-level pre-request script auto-refreshes a near-expired token via `POST /auth/refresh` before any other request runs.\n\n**MFA testing:** TOTP codes are computed live in pre-request scripts from the `secret` returned by `POST /auth/mfa/setup`, using a pure-JS RFC 6238 implementation (Postman's built-in CryptoJS for HMAC-SHA1 + a base32 decoder) — no manual code entry needed to exercise Confirm MFA / Verify MFA Login / Disable MFA.\n\n**Run order matters** — folders build on each other (Setup creates two organizations the Primary User belongs to; MFA enables/disables on that same account; Logout is last because it blacklists the access token and revokes the refresh-token family immediately).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Collection-level: auto-detect a near-expired/missing access token for",
+          "// the current actor(s) and silently refresh it via POST /auth/refresh",
+          "// before the request runs.",
+          "function base64UrlDecode(input) {",
+          "    input = input.replace(/-/g, '+').replace(/_/g, '/');",
+          "    while (input.length % 4) { input += '='; }",
+          "    return decodeURIComponent(",
+          "        atob(input).split('').map(function (c) {",
+          "            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);",
+          "        }).join('')",
+          "    );",
+          "}",
+          "",
+          "function isExpiredOrMissing(token) {",
+          "    if (!token) return true;",
+          "    var parts = token.split('.');",
+          "    if (parts.length !== 3) return true;",
+          "    try {",
+          "        var payload = JSON.parse(base64UrlDecode(parts[1]));",
+          "        return !payload.exp || (payload.exp * 1000) < (Date.now() + 5000);",
+          "    } catch (e) {",
+          "        return true;",
+          "    }",
+          "}",
+          "",
+          "function refreshActor(actor, cb) {",
+          "    var accessVar = actor + '_access_token';",
+          "    var refreshVar = actor + '_refresh_token';",
+          "    var accessToken = pm.collectionVariables.get(accessVar);",
+          "    var refreshToken = pm.collectionVariables.get(refreshVar);",
+          "",
+          "    if (!refreshToken || !isExpiredOrMissing(accessToken)) {",
+          "        return cb();",
+          "    }",
+          "",
+          "    pm.sendRequest({",
+          "        url: pm.collectionVariables.get('base_url') + '/api/v1/auth/refresh',",
+          "        method: 'POST',",
+          "        header: { 'Content-Type': 'application/json' },",
+          "        body: { mode: 'raw', raw: JSON.stringify({ refresh_token: refreshToken }) }",
+          "    }, function (err, res) {",
+          "        if (!err && res && res.code === 200) {",
+          "            var json = res.json();",
+          "            pm.collectionVariables.set(accessVar, json.access_token);",
+          "            pm.collectionVariables.set(refreshVar, json.refresh_token);",
+          "            console.log('[auto-refresh] ' + actor + ' access token refreshed');",
+          "        } else {",
+          "            console.log('[auto-refresh] ' + actor + ' refresh skipped/failed (continuing with existing token)');",
+          "        }",
+          "        cb();",
+          "    });",
+          "}",
+          "",
+          "// Requests whose own Test script defines/rotates a token manage it",
+          "// directly — skip auto-refresh for those so we don't step on them.",
+          "var requestName = pm.info.requestName || '';",
+          "if (!/^(Login|Register|Refresh|Switch Tenant|Verify MFA|Accept Invite)/i.test(requestName)) {",
+          "    refreshActor('member', function () {",
+          "        refreshActor('superuser', function () {});",
+          "    });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "superuser_email", "value": "admin@example.com" },
+    { "key": "superuser_password", "value": "ChangeMe123!" },
+    { "key": "superuser_access_token", "value": "" },
+    { "key": "superuser_refresh_token", "value": "" },
+    { "key": "superuser_user_id", "value": "" },
+    { "key": "member_email", "value": "" },
+    { "key": "member_password", "value": "" },
+    { "key": "member_user_id", "value": "" },
+    { "key": "member_access_token", "value": "" },
+    { "key": "member_refresh_token", "value": "" },
+    { "key": "org_a_name", "value": "" },
+    { "key": "org_a_slug", "value": "" },
+    { "key": "organization_a_id", "value": "" },
+    { "key": "org_b_name", "value": "" },
+    { "key": "org_b_slug", "value": "" },
+    { "key": "organization_b_id", "value": "" },
+    { "key": "new_user_email", "value": "" },
+    { "key": "new_user_password", "value": "" },
+    { "key": "new_user_id", "value": "" },
+    { "key": "new_user_verification_token", "value": "" },
+    { "key": "mfa_secret", "value": "" },
+    { "key": "mfa_recovery_code", "value": "" },
+    { "key": "mfa_challenge_token", "value": "" },
+    { "key": "__totp_code", "value": "" },
+    { "key": "reset_token", "value": "" },
+    { "key": "invite_email", "value": "" },
+    { "key": "invite_token", "value": "" },
+    { "key": "invited_user_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Setup",
+      "description": "Bootstraps a logged-in superuser plus a 'Primary User' who belongs to two organizations (org A and org B) — needed later for the ambiguous-tenant-login, switch-tenant, and MFA-during-login demos.",
+      "item": [
+        {
+          "name": "Login Superuser",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Superuser login succeeded', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('superuser_access_token', body.access_token);",
+                  "pm.collectionVariables.set('superuser_refresh_token', body.refresh_token);",
+                  "if (body.user && body.user.id) {",
+                  "    pm.collectionVariables.set('superuser_user_id', body.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{superuser_email}}\",\n  \"password\": \"{{superuser_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Requires the account named by superuser_email/superuser_password to already exist with is_superuser=true — see the collection description for scripts/create_superuser.py."
+          }
+        },
+        {
+          "name": "Register Primary User",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('member_email', 'primary.' + ts + '@example.com');",
+                  "pm.collectionVariables.set('member_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Registered', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "var body = pm.response.json();",
+                  "pm.collectionVariables.set('member_user_id', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\",\n  \"full_name\": \"John Doe\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            },
+            "description": "Real request body is {email, password, full_name} only — the spec's confirm_password/tenant/client/context fields aren't accepted by RegisterRequest (FastAPI silently ignores unknown fields, so they're omitted here rather than implied to do something)."
+          }
+        },
+        {
+          "name": "Create Organization A (superuser)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('org_a_slug', 'apple-corp-' + ts);",
+                  "pm.collectionVariables.set('org_a_name', 'Apple Corp');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Organization A created', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('organization_a_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{org_a_name}}\",\n  \"slug\": \"{{org_a_slug}}\",\n  \"description\": \"Postman auth-collection test org A\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations"]
+            }
+          }
+        },
+        {
+          "name": "Add Primary User To Organization A (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Added to org A', function () { pm.expect(pm.response.code).to.equal(201); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{member_user_id}}\",\n  \"role_code\": \"member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_a_id}}/members",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_a_id}}", "members"]
+            }
+          }
+        },
+        {
+          "name": "Create Organization B (superuser)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('org_b_slug', 'globex-' + ts);",
+                  "pm.collectionVariables.set('org_b_name', 'Globex Corp');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Organization B created', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('organization_b_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{org_b_name}}\",\n  \"slug\": \"{{org_b_slug}}\",\n  \"description\": \"Postman auth-collection test org B\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations"]
+            },
+            "description": "A second organization, distinct from org A — needed so the Primary User has somewhere to Switch Tenant to, and so a tenant-less Login is ambiguous (belongs to 2 orgs) rather than auto-resolving to 1."
+          }
+        },
+        {
+          "name": "Add Primary User To Organization B (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Added to org B', function () { pm.expect(pm.response.code).to.equal(201); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{member_user_id}}\",\n  \"role_code\": \"member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_b_id}}/members",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_b_id}}", "members"]
+            }
+          }
+        },
+        {
+          "name": "Login Primary User (tenant A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Login succeeded, bound to org A', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.mfa_required).to.equal(false);",
+                  "    // tenant_id (org slug) isn't repeated on body.user.tenant any more —",
+                  "    // it's already the access token's own tenant_id claim.",
+                  "    var claims = JSON.parse(atob(body.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                  "    pm.expect(claims.tenant_id).to.equal(pm.collectionVariables.get('org_a_slug'));",
+                  "    pm.expect(body.user.tenant.id).to.be.a('string');",
+                  "    pm.expect(body.user.tenant).to.not.have.property('tenant_id');",
+                  "});",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\",\n  \"tenant_id\": \"{{org_a_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Registration & Email Verification",
+      "item": [
+        {
+          "name": "Register New User",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('new_user_email', 'newuser.' + ts + '@example.com');",
+                  "pm.collectionVariables.set('new_user_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created, pending verification', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    pm.expect(body.is_verified).to.equal(false);",
+                  "    pm.expect(body.status).to.equal('PENDING_VERIFICATION');",
+                  "    pm.expect(body.verification_required).to.equal(true);",
+                  "    pm.expect(body.verification_method).to.equal('email');",
+                  "    pm.expect(body.expires_in).to.be.a('number');",
+                  "});",
+                  "pm.collectionVariables.set('new_user_id', body.id);",
+                  "if (body.verification_token) {",
+                  "    pm.collectionVariables.set('new_user_verification_token', body.verification_token);",
+                  "} else {",
+                  "    pm.collectionVariables.set('new_user_verification_token', '');",
+                  "    console.warn('[needs DEBUG=true] verification_token withheld — Verify Email below will degrade to a tolerant check instead of actually verifying the account.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{new_user_email}}\",\n  \"password\": \"{{new_user_password}}\",\n  \"full_name\": \"Jane Newcomer\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            },
+            "description": "Real response is the Common User Object's fields (id/email/full_name/is_active/is_verified/is_superuser/attributes) plus status/verification_required/verification_method/verification_token/expires_in — verification_token is only populated when the server runs with DEBUG=true (no email/notification provider wired up)."
+          }
+        },
+        {
+          "name": "Verify Email",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var hadToken = !!pm.collectionVariables.get('new_user_verification_token');",
+                  "if (hadToken) {",
+                  "    var body = pm.response.json();",
+                  "    pm.test('200 OK, VERIFIED', function () {",
+                  "        pm.expect(pm.response.code).to.equal(200);",
+                  "        pm.expect(body.status).to.equal('VERIFIED');",
+                  "        pm.expect(body.message).to.equal('Email verified successfully');",
+                  "        pm.expect(body).to.have.property('verified_at');",
+                  "    });",
+                  "} else {",
+                  "    pm.test('No verification_token available (DEBUG=false) — request correctly rejected', function () {",
+                  "        pm.expect([400, 401, 404, 422]).to.include(pm.response.code);",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"verification_token\": \"{{new_user_verification_token}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/verify-email",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "verify-email"]
+            },
+            "description": "Single-use — calling this twice with the same token 401s the second time (see app/services/auth_service.py::verify_email)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Login",
+      "item": [
+        {
+          "name": "Login — Ambiguous Tenant (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 — multiple tenants, none specified', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "    var body = pm.response.json();",
+                  "    pm.expect(body.organizations).to.be.an('array').with.length.above(1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Primary User belongs to org A and org B (from Setup) with no tenant_id given — TenantSelectionRequiredError, 409, body carries the candidate organizations to retry with."
+          }
+        },
+        {
+          "name": "Login — Success (Tenant A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, tokens issued', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "    pm.expect(body.mfa_required).to.equal(false);",
+                  "});",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);",
+                  "",
+                  "function base64UrlDecode(input) {",
+                  "    input = input.replace(/-/g, '+').replace(/_/g, '/');",
+                  "    while (input.length % 4) { input += '='; }",
+                  "    return decodeURIComponent(",
+                  "        atob(input).split('').map(function (c) {",
+                  "            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);",
+                  "        }).join('')",
+                  "    );",
+                  "}",
+                  "var claims = JSON.parse(base64UrlDecode(body.access_token.split('.')[1]));",
+                  "pm.test('Access token carries the real claim set (sub/type/tenant_id/role/is_superuser/iat/exp/jti)', function () {",
+                  "    pm.expect(claims.sub).to.equal(pm.collectionVariables.get('member_user_id'));",
+                  "    pm.expect(claims.type).to.equal('access');",
+                  "    pm.expect(claims.tenant_id).to.equal(pm.collectionVariables.get('org_a_slug'));",
+                  "    pm.expect(claims.role).to.equal('member');",
+                  "    pm.expect(claims.is_superuser).to.equal(false);",
+                  "    pm.expect(claims).to.have.property('iat');",
+                  "    pm.expect(claims).to.have.property('exp');",
+                  "    pm.expect(claims).to.have.property('jti');",
+                  "});",
+                  "if (claims.permissions) {",
+                  "    console.warn('[spec mismatch] token unexpectedly carries a permissions claim — spec doc assumed this, but the implementation resolves permissions server-side per-request instead.');",
+                  "}",
+                  "pm.test('Login response body never duplicates tenant_id/role/is_superuser already on the token', function () {",
+                  "    pm.expect(body.user).to.not.have.property('is_superuser');",
+                  "    pm.expect(body.user.tenant).to.not.have.property('tenant_id');",
+                  "    pm.expect(body.user.role).to.not.have.property('name');",
+                  "    pm.expect(body.user.tenant.id).to.be.a('string');",
+                  "    pm.expect(body.user.role.id).to.be.a('string');",
+                  "});",
+                  "pm.test(\"session.device prefers client.device_name over the User-Agent header\", function () {",
+                  "    pm.expect(body.session.device).to.equal('MacBook Pro');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\",\n  \"tenant_id\": \"{{org_a_slug}}\",\n  \"client\": {\n    \"device_id\": \"dev123\",\n    \"device_name\": \"MacBook Pro\",\n    \"platform\": \"macOS\",\n    \"browser\": \"Chrome\"\n  },\n  \"context\": {\n    \"ip_address\": \"203.0.113.10\",\n    \"timezone\": \"Asia/Dhaka\",\n    \"locale\": \"en-US\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "client/context are both fully optional (only email/password are required) — every field within them is optional too. When client.device_name is given, it's used for session.device instead of parsing the User-Agent header; context is accepted but otherwise informational only today (never trusted over the real connection IP)."
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, rotated tokens', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{member_refresh_token}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/refresh",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "refresh"]
+            },
+            "description": "Refresh-token rotation: the old refresh_token is invalidated and a new one issued — member_refresh_token is overwritten with the new value above."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. MFA",
+      "description": "TOTP codes are computed live from the secret returned by 'Setup MFA' — see each pre-request script. Standard RFC 6238: HMAC-SHA1, 30s step, 6 digits (matches app/infrastructure/security/mfa.py's pyotp defaults).",
+      "item": [
+        {
+          "name": "Setup MFA",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, secret + otpauth URI issued', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.secret).to.be.a('string');",
+                  "    pm.expect(body.otpauth_uri).to.match(/^otpauth:\\/\\//);",
+                  "});",
+                  "pm.collectionVariables.set('mfa_secret', body.secret);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/mfa/setup",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "mfa", "setup"]
+            },
+            "description": "Not active until Confirm MFA verifies a code against this secret."
+          }
+        },
+        {
+          "name": "Confirm MFA",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "function base32Decode(base32) {",
+                  "    var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';",
+                  "    base32 = base32.replace(/=+$/, '').toUpperCase();",
+                  "    var bits = '';",
+                  "    for (var i = 0; i < base32.length; i++) {",
+                  "        var idx = alphabet.indexOf(base32[i]);",
+                  "        if (idx === -1) continue;",
+                  "        bits += idx.toString(2).padStart(5, '0');",
+                  "    }",
+                  "    var bytes = [];",
+                  "    for (var j = 0; j + 8 <= bits.length; j += 8) {",
+                  "        bytes.push(parseInt(bits.substring(j, j + 8), 2));",
+                  "    }",
+                  "    return bytes;",
+                  "}",
+                  "function bytesToWordArray(bytes) {",
+                  "    var words = [];",
+                  "    for (var i = 0; i < bytes.length; i += 4) {",
+                  "        words.push(((bytes[i] || 0) << 24) | ((bytes[i + 1] || 0) << 16) | ((bytes[i + 2] || 0) << 8) | (bytes[i + 3] || 0));",
+                  "    }",
+                  "    return CryptoJS.lib.WordArray.create(words, bytes.length);",
+                  "}",
+                  "function generateTotp(base32Secret) {",
+                  "    var keyWords = bytesToWordArray(base32Decode(base32Secret));",
+                  "    var counter = Math.floor(Date.now() / 1000 / 30);",
+                  "    var counterBytes = [0, 0, 0, 0, 0, 0, 0, 0];",
+                  "    for (var i = 7; i >= 0 && counter > 0; i--) {",
+                  "        counterBytes[i] = counter & 0xff;",
+                  "        counter = Math.floor(counter / 256);",
+                  "    }",
+                  "    var hmac = CryptoJS.HmacSHA1(bytesToWordArray(counterBytes), keyWords);",
+                  "    var hmacBytes = [];",
+                  "    for (var w = 0; w < hmac.words.length; w++) {",
+                  "        var word = hmac.words[w];",
+                  "        hmacBytes.push((word >> 24) & 0xff, (word >> 16) & 0xff, (word >> 8) & 0xff, word & 0xff);",
+                  "    }",
+                  "    var offset = hmacBytes[19] & 0xf;",
+                  "    var binCode = ((hmacBytes[offset] & 0x7f) << 24) | ((hmacBytes[offset + 1] & 0xff) << 16) | ((hmacBytes[offset + 2] & 0xff) << 8) | (hmacBytes[offset + 3] & 0xff);",
+                  "    var otp = (binCode % 1000000).toString();",
+                  "    while (otp.length < 6) { otp = '0' + otp; }",
+                  "    return otp;",
+                  "}",
+                  "pm.collectionVariables.set('__totp_code', generateTotp(pm.collectionVariables.get('mfa_secret')));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, recovery codes issued', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.recovery_codes).to.be.an('array').that.is.not.empty;",
+                  "});",
+                  "pm.collectionVariables.set('mfa_recovery_code', body.recovery_codes[0]);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{member_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"{{__totp_code}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/mfa/confirm",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "mfa", "confirm"]
+            },
+            "description": "Activates MFA on the Primary User's account — every login from here on returns mfa_required:true until Disable MFA below."
+          }
+        },
+        {
+          "name": "Login — Triggers MFA Challenge",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, MFA challenge issued (no tokens yet)', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.mfa_required).to.equal(true);",
+                  "    pm.expect(body.access_token).to.equal(null);",
+                  "    pm.expect(body.mfa_challenge_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('mfa_challenge_token', body.mfa_challenge_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\",\n  \"tenant_id\": \"{{org_a_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Deliberately does NOT overwrite member_access_token (the test script only ever reads mfa_challenge_token) — the previous valid token from folder 2 stays usable while this MFA challenge is resolved below."
+          }
+        },
+        {
+          "name": "Verify MFA Login",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "function base32Decode(base32) {",
+                  "    var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';",
+                  "    base32 = base32.replace(/=+$/, '').toUpperCase();",
+                  "    var bits = '';",
+                  "    for (var i = 0; i < base32.length; i++) {",
+                  "        var idx = alphabet.indexOf(base32[i]);",
+                  "        if (idx === -1) continue;",
+                  "        bits += idx.toString(2).padStart(5, '0');",
+                  "    }",
+                  "    var bytes = [];",
+                  "    for (var j = 0; j + 8 <= bits.length; j += 8) {",
+                  "        bytes.push(parseInt(bits.substring(j, j + 8), 2));",
+                  "    }",
+                  "    return bytes;",
+                  "}",
+                  "function bytesToWordArray(bytes) {",
+                  "    var words = [];",
+                  "    for (var i = 0; i < bytes.length; i += 4) {",
+                  "        words.push(((bytes[i] || 0) << 24) | ((bytes[i + 1] || 0) << 16) | ((bytes[i + 2] || 0) << 8) | (bytes[i + 3] || 0));",
+                  "    }",
+                  "    return CryptoJS.lib.WordArray.create(words, bytes.length);",
+                  "}",
+                  "function generateTotp(base32Secret) {",
+                  "    var keyWords = bytesToWordArray(base32Decode(base32Secret));",
+                  "    var counter = Math.floor(Date.now() / 1000 / 30);",
+                  "    var counterBytes = [0, 0, 0, 0, 0, 0, 0, 0];",
+                  "    for (var i = 7; i >= 0 && counter > 0; i--) {",
+                  "        counterBytes[i] = counter & 0xff;",
+                  "        counter = Math.floor(counter / 256);",
+                  "    }",
+                  "    var hmac = CryptoJS.HmacSHA1(bytesToWordArray(counterBytes), keyWords);",
+                  "    var hmacBytes = [];",
+                  "    for (var w = 0; w < hmac.words.length; w++) {",
+                  "        var word = hmac.words[w];",
+                  "        hmacBytes.push((word >> 24) & 0xff, (word >> 16) & 0xff, (word >> 8) & 0xff, word & 0xff);",
+                  "    }",
+                  "    var offset = hmacBytes[19] & 0xf;",
+                  "    var binCode = ((hmacBytes[offset] & 0x7f) << 24) | ((hmacBytes[offset + 1] & 0xff) << 16) | ((hmacBytes[offset + 2] & 0xff) << 8) | (hmacBytes[offset + 3] & 0xff);",
+                  "    var otp = (binCode % 1000000).toString();",
+                  "    while (otp.length < 6) { otp = '0' + otp; }",
+                  "    return otp;",
+                  "}",
+                  "pm.collectionVariables.set('__totp_code', generateTotp(pm.collectionVariables.get('mfa_secret')));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, real tokens issued', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mfa_challenge_token\": \"{{mfa_challenge_token}}\",\n  \"code\": \"{{__totp_code}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/mfa/login-verify",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "mfa", "login-verify"]
+            },
+            "description": "Spec doc names this POST /auth/verify-mfa with {challenge_token, otp} — the real route/fields are POST /auth/mfa/login-verify with {mfa_challenge_token, code}."
+          }
+        },
+        {
+          "name": "Disable MFA",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "function base32Decode(base32) {",
+                  "    var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';",
+                  "    base32 = base32.replace(/=+$/, '').toUpperCase();",
+                  "    var bits = '';",
+                  "    for (var i = 0; i < base32.length; i++) {",
+                  "        var idx = alphabet.indexOf(base32[i]);",
+                  "        if (idx === -1) continue;",
+                  "        bits += idx.toString(2).padStart(5, '0');",
+                  "    }",
+                  "    var bytes = [];",
+                  "    for (var j = 0; j + 8 <= bits.length; j += 8) {",
+                  "        bytes.push(parseInt(bits.substring(j, j + 8), 2));",
+                  "    }",
+                  "    return bytes;",
+                  "}",
+                  "function bytesToWordArray(bytes) {",
+                  "    var words = [];",
+                  "    for (var i = 0; i < bytes.length; i += 4) {",
+                  "        words.push(((bytes[i] || 0) << 24) | ((bytes[i + 1] || 0) << 16) | ((bytes[i + 2] || 0) << 8) | (bytes[i + 3] || 0));",
+                  "    }",
+                  "    return CryptoJS.lib.WordArray.create(words, bytes.length);",
+                  "}",
+                  "function generateTotp(base32Secret) {",
+                  "    var keyWords = bytesToWordArray(base32Decode(base32Secret));",
+                  "    var counter = Math.floor(Date.now() / 1000 / 30);",
+                  "    var counterBytes = [0, 0, 0, 0, 0, 0, 0, 0];",
+                  "    for (var i = 7; i >= 0 && counter > 0; i--) {",
+                  "        counterBytes[i] = counter & 0xff;",
+                  "        counter = Math.floor(counter / 256);",
+                  "    }",
+                  "    var hmac = CryptoJS.HmacSHA1(bytesToWordArray(counterBytes), keyWords);",
+                  "    var hmacBytes = [];",
+                  "    for (var w = 0; w < hmac.words.length; w++) {",
+                  "        var word = hmac.words[w];",
+                  "        hmacBytes.push((word >> 24) & 0xff, (word >> 16) & 0xff, (word >> 8) & 0xff, word & 0xff);",
+                  "    }",
+                  "    var offset = hmacBytes[19] & 0xf;",
+                  "    var binCode = ((hmacBytes[offset] & 0x7f) << 24) | ((hmacBytes[offset + 1] & 0xff) << 16) | ((hmacBytes[offset + 2] & 0xff) << 8) | (hmacBytes[offset + 3] & 0xff);",
+                  "    var otp = (binCode % 1000000).toString();",
+                  "    while (otp.length < 6) { otp = '0' + otp; }",
+                  "    return otp;",
+                  "}",
+                  "pm.collectionVariables.set('__totp_code', generateTotp(pm.collectionVariables.get('mfa_secret')));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('204 No Content — MFA disabled', function () { pm.response.to.have.status(204); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{member_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"current_password\": \"{{member_password}}\",\n  \"code\": \"{{__totp_code}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/mfa/disable",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "mfa", "disable"]
+            },
+            "description": "Leaves the Primary User's account in a clean (MFA-off) state for the rest of the collection — not in the spec doc, but needed to undo Confirm MFA above."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Password Management",
+      "item": [
+        {
+          "name": "Forgot Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK', function () { pm.expect(pm.response.code).to.equal(200); });",
+                  "if (body.reset_token) {",
+                  "    pm.collectionVariables.set('reset_token', body.reset_token);",
+                  "} else {",
+                  "    pm.collectionVariables.set('reset_token', '');",
+                  "    console.warn('[needs DEBUG=true] reset_token withheld — Reset Password below will degrade to a tolerant 404/401 check instead of actually resetting the password.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/forgot-password",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "forgot-password"]
+            },
+            "description": "Always 200s with the same generic message regardless of whether the email matched an account. reset_token is only present in the body when the server runs with DEBUG=true (no email provider wired up)."
+          }
+        },
+        {
+          "name": "Reset Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var hadToken = !!pm.collectionVariables.get('reset_token');",
+                  "if (hadToken) {",
+                  "    pm.test('204 No Content — password reset', function () {",
+                  "        pm.response.to.have.status(204);",
+                  "    });",
+                  "    pm.collectionVariables.set('member_password', 'NewSecurePassword123!');",
+                  "} else {",
+                  "    pm.test('No reset_token available (DEBUG=false) — request correctly rejected', function () {",
+                  "        pm.expect([400, 401, 404, 422]).to.include(pm.response.code);",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{reset_token}}\",\n  \"new_password\": \"NewSecurePassword123!\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/reset-password",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "reset-password"]
+            },
+            "description": "Spec doc's field name is reset_token; the real ResetPasswordRequest field is just token. Also no confirm_password field (and no server-side equality check for one) — and a successful reset is 204, not {success,message}."
+          }
+        },
+        {
+          "name": "Change Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content — password changed', function () { pm.response.to.have.status(204); });",
+                  "pm.collectionVariables.set('member_password', 'NewPassword456!');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{member_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"current_password\": \"{{member_password}}\",\n  \"new_password\": \"NewPassword456!\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/change-password",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "change-password"]
+            },
+            "description": "current_password here is whatever member_password currently holds — NewSecurePassword123! if Reset Password actually ran (DEBUG=true), otherwise the original registration password."
+          }
+        },
+        {
+          "name": "Re-login With New Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK — new password accepted', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\",\n  \"tenant_id\": \"{{org_a_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Confirms Change Password actually took effect end-to-end."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Tenant Switching & Invitations",
+      "item": [
+        {
+          "name": "Switch Tenant",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, re-bound to org B', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    // Response is just {access_token} now — tenant_id/role aren't",
+                  "    // repeated in the body, they're already the re-minted token's claims.",
+                  "    pm.expect(Object.keys(body)).to.eql(['access_token']);",
+                  "    var claims = JSON.parse(atob(body.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                  "    pm.expect(claims.tenant_id).to.equal(pm.collectionVariables.get('org_b_slug'));",
+                  "});",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{member_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{org_b_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/switch-tenant",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "switch-tenant"]
+            },
+            "description": "Re-mints an access token under org B, which the Primary User already has membership in (from Setup) — doesn't require re-authenticating."
+          }
+        },
+        {
+          "name": "Invite New Member To Org A (superuser)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('invite_email', 'invitee.' + Date.now() + '@example.com');"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "if (body.invitation_token) {",
+                  "    pm.collectionVariables.set('invite_token', body.invitation_token);",
+                  "} else {",
+                  "    pm.collectionVariables.set('invite_token', '');",
+                  "    console.warn('[needs DEBUG=true] invitation_token withheld — Accept Invite below will degrade to a tolerant check instead of actually accepting it.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{invite_email}}\",\n  \"role_code\": \"member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_a_id}}/invitations",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_a_id}}", "invitations"]
+            },
+            "description": "Scaffolding, not itself part of the Auth API spec — generates the invite_token Accept Invite (spec section 10) needs. Only revealed in the response body when DEBUG=true, same caveat as forgot-password's reset_token."
+          }
+        },
+        {
+          "name": "Accept Invite",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var hadToken = !!pm.collectionVariables.get('invite_token');",
+                  "if (hadToken) {",
+                  "    var body = pm.response.json();",
+                  "    pm.test('201 Created, ACTIVE membership', function () {",
+                  "        pm.expect(pm.response.code).to.equal(201);",
+                  "        pm.expect(body.status).to.equal('ACTIVE');",
+                  "        pm.expect(body.tenant_id).to.equal(pm.collectionVariables.get('org_a_slug'));",
+                  "    });",
+                  "    pm.collectionVariables.set('invited_user_id', body.user_id);",
+                  "} else {",
+                  "    pm.test('No invite_token available (DEBUG=false) — request correctly rejected', function () {",
+                  "        pm.expect([400, 401, 404, 422]).to.include(pm.response.code);",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"invite_token\": \"{{invite_token}}\",\n  \"name\": \"Ivy Invitee\",\n  \"password\": \"Sup3rSecret!23\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/accept-invite",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "accept-invite"]
+            },
+            "description": "Self-service signup via a tenant invitation, no prior account or authentication required — matches the spec's request/response shape exactly when invite_token is real."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Logout",
+      "description": "Run this LAST — logout blacklists the access token's jti and revokes the entire refresh-token family immediately, so member_access_token/member_refresh_token are unusable for the rest of the collection afterward.",
+      "item": [
+        {
+          "name": "Logout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('204 No Content', function () { pm.response.to.have.status(204); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/logout",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "logout"]
+            },
+            "description": "Real response is 204 No Content, not the spec's {success, message} body. Relies on Postman's per-domain cookie jar to also send the httponly refresh_token cookie set by the last Login/Switch Tenant call, in addition to the bearer access token, so both the refresh-token family and the access token's jti get invalidated."
+          }
+        }
+      ]
+    }
+  ]
+}

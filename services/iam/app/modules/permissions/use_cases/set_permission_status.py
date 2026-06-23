@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from app.audit import AuditLogRepository
+from app.modules.permissions.exceptions import PermissionNotFoundError
+from app.modules.permissions.models import Permission
+from app.modules.permissions.repositories.interfaces.permission_repository import (
+    PermissionRepository,
+)
+from app.modules.permissions.schemas.commands.set_permission_status_command import (
+    SetPermissionStatusCommand,
+)
+from app.modules.permissions.use_cases._audit import record_permission_audit_event
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+class SetPermissionStatusUseCase:
+    def __init__(
+        self, session: AsyncSession, permissions: PermissionRepository, audit_log: AuditLogRepository
+    ) -> None:
+        self._session = session
+        self._permissions = permissions
+        self._audit_log = audit_log
+
+    async def execute(self, command: SetPermissionStatusCommand) -> Permission:
+        permission = await self._permissions.get_by_id(command.permission_id)
+        if permission is None:
+            raise PermissionNotFoundError(f"No permission with id '{command.permission_id}'")
+
+        permission.status = command.status
+        permission.updated_at = datetime.now(UTC)
+        event = "permission.enabled" if command.status == "ACTIVE" else "permission.disabled"
+        await record_permission_audit_event(
+            self._session, self._audit_log, event, command.actor_id, permission, {}
+        )
+        return permission

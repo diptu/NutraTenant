@@ -1,44 +1,41 @@
 """FastAPI application factory."""
 
-from app.api.v1.routes import (
-    admin,
-    auth,
-    organizations,
-    permissions,
-    policies,
-    resources,
-    roles,
-    tenant_groups,
-    tenants,
-    users,
-)
+from app.api.v1.router import router as api_v1_router
 from app.core.config import get_settings
 from app.core.context_middleware import ContextExtractionMiddleware
 from app.core.logging import RequestIDMiddleware, configure_logging
 from app.core.metrics import MetricsMiddleware, render_metrics
 from app.core.security_headers import SecurityHeadersMiddleware
-from app.domain.exceptions import (
+from app.modules.access_governance.exceptions import (
+    AccessApprovalNotFoundError,
+    AccessRequestNotFoundError,
+    AccessReviewNotFoundError,
+)
+from app.modules.auth.exceptions import (
     AccountLockedError,
-    AlreadyExistsError,
-    DomainError,
-    ForbiddenError,
     InvalidCredentialsError,
     InvalidMfaCodeError,
     InvalidTokenError,
+    RateLimitExceededError,
+    SessionNotFoundError,
+    TenantSelectionRequiredError,
+)
+from app.modules.groups.exceptions import GroupMembershipNotFoundError, GroupNotFoundError
+from app.modules.organizations.exceptions import (
     InvitationNotFoundError,
     OrganizationNotFoundError,
-    OrganizationTenantLinkNotFoundError,
-    PermissionNotFoundError,
-    PolicyNotFoundError,
-    RateLimitExceededError,
-    ResourceNotFoundError,
-    RoleNotAssignedError,
-    RoleNotFoundError,
-    SessionNotFoundError,
-    TenantNotFoundError,
-    TenantSelectionRequiredError,
-    UserNotFoundError,
 )
+from app.modules.permissions.exceptions import PermissionNotFoundError
+from app.modules.policies.exceptions import PolicyNotFoundError
+from app.modules.reserved_tenant_ids.exceptions import ReservedTenantIdNotFoundError
+from app.modules.resources.exceptions import ResourceNotFoundError
+from app.modules.roles.exceptions import RoleNotAssignedError, RoleNotFoundError
+from app.modules.tenants.exceptions import (
+    OrganizationTenantLinkNotFoundError,
+    TenantNotFoundError,
+)
+from app.modules.users.exceptions import UserNotFoundError
+from app.shared.exceptions.base import AlreadyExistsError, DomainError, ForbiddenError
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -55,6 +52,12 @@ _NOT_FOUND_ERRORS = (
     TenantNotFoundError,
     OrganizationTenantLinkNotFoundError,
     SessionNotFoundError,
+    GroupNotFoundError,
+    GroupMembershipNotFoundError,
+    AccessRequestNotFoundError,
+    AccessReviewNotFoundError,
+    AccessApprovalNotFoundError,
+    ReservedTenantIdNotFoundError,
 )
 _UNAUTHORIZED_ERRORS = (
     InvalidCredentialsError,
@@ -115,6 +118,9 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allow_origins,
+        # Matches per-tenant subdomain origins (e.g. apple-corp.localhost:3000)
+        # against cors_allowed_base_domains — see Settings.cors_origin_regex.
+        allow_origin_regex=settings.cors_origin_regex(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -130,16 +136,7 @@ def create_app() -> FastAPI:
     async def metrics() -> PlainTextResponse:
         return PlainTextResponse(render_metrics(), media_type="text/plain")
 
-    app.include_router(auth.router, prefix="/api/v1")
-    app.include_router(users.router, prefix="/api/v1")
-    app.include_router(organizations.router, prefix="/api/v1")
-    app.include_router(roles.router, prefix="/api/v1")
-    app.include_router(permissions.router, prefix="/api/v1")
-    app.include_router(resources.router, prefix="/api/v1")
-    app.include_router(policies.router, prefix="/api/v1")
-    app.include_router(tenants.router, prefix="/api/v1")
-    app.include_router(tenant_groups.router, prefix="/api/v1")
-    app.include_router(admin.router, prefix="/api/v1")
+    app.include_router(api_v1_router, prefix="/api/v1")
 
     return app
 

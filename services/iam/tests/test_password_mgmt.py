@@ -19,7 +19,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from app.infrastructure.db.models.audit_log import AuditLog
+from app.audit import AuditLog
 from sqlalchemy import select
 
 _DEFAULT_PASSWORD = "StrongPass1!"

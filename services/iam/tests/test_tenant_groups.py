@@ -12,7 +12,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 import pytest
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
@@ -43,17 +43,13 @@ async def _make_superuser(db_session, user_id: str) -> None:
 
 
 async def _create_org(client, token: str, *, slug: str, name: str = "Acme Inc") -> dict:
-    resp = await client.post(
-        "/api/v1/organizations", json={"name": name, "slug": slug}, headers=_auth(token)
-    )
+    resp = await client.post("/api/v1/organizations", json={"name": name, "slug": slug}, headers=_auth(token))
     assert resp.status_code == 201, resp.text
     return resp.json()
 
 
 async def _create_tenant_group(client, token: str, *, slug: str, name: str = "Acme Group") -> dict:
-    resp = await client.post(
-        "/api/v1/tenant-groups", json={"name": name, "slug": slug}, headers=_auth(token)
-    )
+    resp = await client.post("/api/v1/tenant-groups", json={"name": name, "slug": slug}, headers=_auth(token))
     assert resp.status_code == 201, resp.text
     return resp.json()
 

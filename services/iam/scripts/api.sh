@@ -240,21 +240,24 @@ section "6. ROLES & PERMISSIONS"
 request POST "/roles/seed" "$SU_TOKEN" "" "200" "superuser seeds the default global roles"
 GLOBAL_ROLE_ID="$(jf '.[] | select(.code=="guest") | .id')"
 
-request GET "/roles" "$SU_TOKEN" "" "200" "list all roles"
+# GET/POST /roles now follow Role_API_Specification_Extended.md: tenant-scoped
+# via tenant_id (slug) rather than organization_id, slug instead of code, and
+# {message,role}/{role}/{total,page,page_size,roles} response envelopes.
+request GET "/roles" "$SU_TOKEN" "" "403" "superuser with no tenant context can't list without ?tenant_id or being superuser-global"
+request GET "/roles?tenant_id=${ORG_SLUG}" "$SU_TOKEN" "" "200" "list acme's roles (explicit tenant_id override)"
 
-request POST "/roles" "$SU_TOKEN" "{\"name\":\"Custom Org Role ${RUN_ID}\",\"code\":\"custom_role_${RUN_ID}\",\"organization_id\":\"${ORG_ID}\"}" "201" "superuser creates an org-scoped custom role"
-CUSTOM_ROLE_ID="$(jf '.id')"
+request POST "/roles" "$SU_TOKEN" "{\"name\":\"Custom Org Role ${RUN_ID}\",\"slug\":\"custom_role_${RUN_ID}\",\"tenant_id\":\"${ORG_SLUG}\"}" "201" "superuser creates an org-scoped custom role"
+CUSTOM_ROLE_ID="$(jf '.role.id')"
 
 request GET "/roles/${CUSTOM_ROLE_ID}" "$SU_TOKEN" "" "200" "get the custom role by id"
 
-request PATCH "/roles/${CUSTOM_ROLE_ID}" "$SU_TOKEN" '{"description":"Updated description"}' "200" "update the custom role"
+request PUT "/roles/${CUSTOM_ROLE_ID}" "$SU_TOKEN" '{"description":"Updated description"}' "200" "update the custom role"
 
-request POST "/roles/${CUSTOM_ROLE_ID}/permissions" "$SU_TOKEN" '{"permission_codes":["organizations:read"]}' "200" "grant a permission to the custom role"
-GRANTED_PERMISSION_ID="$(jf '.permissions[0].id')"
+request POST "/roles/${CUSTOM_ROLE_ID}/permissions" "$SU_TOKEN" '{"permissions":["organizations:read"]}' "200" "grant a permission to the custom role"
 
-if [[ -n "$GRANTED_PERMISSION_ID" && "$GRANTED_PERMISSION_ID" != "null" ]]; then
-  request DELETE "/roles/${CUSTOM_ROLE_ID}/permissions/${GRANTED_PERMISSION_ID}" "$SU_TOKEN" "" "200" "revoke that permission from the custom role"
-fi
+request GET "/roles/${CUSTOM_ROLE_ID}/permissions" "$SU_TOKEN" "" "200" "list the custom role's permissions"
+
+request DELETE "/roles/${CUSTOM_ROLE_ID}/permissions" "$SU_TOKEN" '{"permissions":["organizations:read"]}' "200" "revoke that permission from the custom role (bulk by code)"
 
 # /roles/{id}/assignments is the platform-wide user_roles table — a
 # separate mechanism from org membership roles, and global-roles-only
@@ -265,7 +268,7 @@ request GET "/roles/assignments/${ALICE_ID}" "$SU_TOKEN" "" "200" "list alice's 
 
 request DELETE "/roles/${GLOBAL_ROLE_ID}/assignments/${ALICE_ID}" "$SU_TOKEN" "" "204" "revoke the global role from alice"
 
-request DELETE "/roles/${CUSTOM_ROLE_ID}" "$SU_TOKEN" "" "204" "delete the custom role (cleanup)"
+request DELETE "/roles/${CUSTOM_ROLE_ID}" "$SU_TOKEN" "" "200" "delete the custom role (cleanup)"
 
 # ---------------------------------------------------------------------------
 section "7. RESOURCES"

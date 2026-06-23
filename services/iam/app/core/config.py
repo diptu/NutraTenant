@@ -6,6 +6,7 @@ for the full var list and defaults used in local development).
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 
 from pydantic import Field
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
     password_reset_token_expire_minutes: int = 30
+    email_verification_token_expire_minutes: int = 15
     # 24h (86,400s) — the explicit TTL requirement for tenant invitations.
     organization_invitation_expire_minutes: int = 24 * 60
 
@@ -43,6 +45,23 @@ class Settings(BaseSettings):
     google_oauth_state_ttl_seconds: int = 600
 
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    # Per-tenant subdomain frontends (e.g. apple-corp.localhost:3000) don't
+    # match any single fixed origin above — CORSMiddleware's allow_origins
+    # is an exact-string list, with no subdomain wildcarding. Each entry
+    # here ("localhost:3000", later a real base domain) becomes a regex
+    # alternative matching that bare host:port *and* any "{tenant}." prefix
+    # of it, via `cors_origin_regex()` below.
+    cors_allowed_base_domains: list[str] = Field(default_factory=lambda: ["localhost:3000"])
+
+    def cors_origin_regex(self) -> str | None:
+        """Built from `cors_allowed_base_domains` — passed to CORSMiddleware's
+        `allow_origin_regex` alongside the static `cors_allow_origins` list
+        (Starlette checks an incoming Origin against both; either matching
+        is enough)."""
+        if not self.cors_allowed_base_domains:
+            return None
+        alternatives = "|".join(re.escape(domain) for domain in self.cors_allowed_base_domains)
+        return rf"^https?://([a-z0-9-]+\.)?({alternatives})$"
 
     rate_limit_window_seconds: int = 60
     rate_limit_max_requests: int = 60

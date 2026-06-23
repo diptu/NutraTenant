@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from app.audit import AuditLog
 from app.core.config import get_settings
 from app.core.rate_limit import (
     InMemoryRateLimiter,
@@ -26,8 +27,7 @@ from app.core.token_blacklist import (
     RedisTokenBlacklist,
     get_token_blacklist,
 )
-from app.infrastructure.db.models.audit_log import AuditLog
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -92,13 +92,10 @@ def _build_bare_protected_app(*, token_blacklist_override, async_db_override) ->
     real Redis either) overrides passed in rather than inheriting the main
     app's.
     """
-    from app.api.v1.dependencies import (
-        get_async_db,
-        get_current_user,
-        get_token_blacklist,
-    )
+    from app.core.token_blacklist import get_token_blacklist
     from app.domain.exceptions import DomainError
     from app.main import _domain_error_handler
+    from app.modules.auth.dependencies import get_async_db, get_current_user
 
     bare_app = FastAPI()
     bare_app.add_exception_handler(DomainError, _domain_error_handler)
@@ -326,7 +323,8 @@ class TestAccessTokenBlacklist:
         """Same revocation check, exercised against a minimal app that only
         wires up get_current_user — confirms the blacklist check isn't
         somehow specific to the production router wiring."""
-        from app.api.v1.dependencies import get_async_db, get_token_blacklist
+        from app.core.token_blacklist import get_token_blacklist
+        from app.modules.auth.dependencies import get_async_db
 
         email = "blacklist-standalone@example.com"
         await _register(client, email)

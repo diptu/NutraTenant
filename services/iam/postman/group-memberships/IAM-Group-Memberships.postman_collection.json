@@ -1,0 +1,1070 @@
+{
+  "info": {
+    "name": "IAM Service — Group Memberships API",
+    "_postman_id": "f6d4b8a3-1e5c-4a2f-9d3e-iam-groupmem-0001",
+    "description": "Exercises every /api/v1/group-memberships endpoint in app/api/v1/routes/group_memberships.py, implemented from groups-group-memberships-api-spec. Sibling to ../groups (the other half of that same spec doc) — kept as its own collection, with its own independent tenant bootstrap, so it can be run/maintained on its own.\n\n**Example data is drawn from scripts/dummy.json's Apple Corp tenant**, *except* the platform superuser: dummy.json has no superadmin concept, and every group-memberships request here is driven by the tenant **owner** (John Smith) or by Engineering employees Alice Miller / Bob Davis — never by `superuser_access_token`. Adding/removing/updating a group membership only ever requires being that tenant's owner (same gate as managing the group itself); the platform superuser is used strictly to bootstrap the organization in Setup.\n\n**Notes on the implementation vs. the spec doc:**\n- A membership has no `tenant_id` column of its own — its tenant is always its group's tenant. The API still accepts/returns `tenant_id` to match the spec's wire shape; on create it's validated against the target group (a mismatch 404s, same as an unknown group).\n- `member_count` on the owning group (see ../groups) only counts `ACTIVE` memberships — folder 2 demonstrates that count moving as memberships are updated/deleted.\n\n**Prerequisites:**\n1. Run the service: `uv run uvicorn app.main:app --reload --port 8000`.\n2. Create a superuser: `uv run python scripts/create_superuser.py admin@example.com ChangeMe123!` (update `superuser_email`/`superuser_password` below if different) — needed only for Setup's organization bootstrap.\n\n**Auto token handling:** same pattern as the sibling collections — Login Test scripts capture tokens per actor into collection variables, and a collection-level pre-request script auto-refreshes a near-expired token via POST /auth/refresh before any other request runs.\n\n**Run order matters** — later folders assume earlier ones ran.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Collection-level: auto-detect a near-expired/missing access token for",
+          "// the current actor(s) and silently refresh it via POST /auth/refresh",
+          "// before the request runs.",
+          "function base64UrlDecode(input) {",
+          "    input = input.replace(/-/g, '+').replace(/_/g, '/');",
+          "    while (input.length % 4) { input += '='; }",
+          "    return decodeURIComponent(",
+          "        atob(input).split('').map(function (c) {",
+          "            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);",
+          "        }).join('')",
+          "    );",
+          "}",
+          "",
+          "function isExpiredOrMissing(token) {",
+          "    if (!token) return true;",
+          "    var parts = token.split('.');",
+          "    if (parts.length !== 3) return true;",
+          "    try {",
+          "        var payload = JSON.parse(base64UrlDecode(parts[1]));",
+          "        return !payload.exp || (payload.exp * 1000) < (Date.now() + 5000);",
+          "    } catch (e) {",
+          "        return true;",
+          "    }",
+          "}",
+          "",
+          "function refreshActor(actor, cb) {",
+          "    var accessVar = actor + '_access_token';",
+          "    var refreshVar = actor + '_refresh_token';",
+          "    var accessToken = pm.collectionVariables.get(accessVar);",
+          "    var refreshToken = pm.collectionVariables.get(refreshVar);",
+          "",
+          "    if (!refreshToken || !isExpiredOrMissing(accessToken)) {",
+          "        return cb();",
+          "    }",
+          "",
+          "    pm.sendRequest({",
+          "        url: pm.collectionVariables.get('base_url') + '/api/v1/auth/refresh',",
+          "        method: 'POST',",
+          "        header: { 'Content-Type': 'application/json' },",
+          "        body: { mode: 'raw', raw: JSON.stringify({ refresh_token: refreshToken }) }",
+          "    }, function (err, res) {",
+          "        if (!err && res && res.code === 200) {",
+          "            var json = res.json();",
+          "            pm.collectionVariables.set(accessVar, json.access_token);",
+          "            pm.collectionVariables.set(refreshVar, json.refresh_token);",
+          "            console.log('[auto-refresh] ' + actor + ' access token refreshed');",
+          "        } else {",
+          "            console.log('[auto-refresh] ' + actor + ' refresh skipped/failed (continuing with existing token)');",
+          "        }",
+          "        cb();",
+          "    });",
+          "}",
+          "",
+          "var requestName = pm.info.requestName || '';",
+          "if (!/^(Login|Register|Refresh)/i.test(requestName)) {",
+          "    refreshActor('superuser', function () {",
+          "        refreshActor('owner', function () {",
+          "            refreshActor('alice', function () {",
+          "                refreshActor('bob', function () {});",
+          "            });",
+          "        });",
+          "    });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "superuser_email", "value": "admin@example.com" },
+    { "key": "superuser_password", "value": "ChangeMe123!" },
+    { "key": "superuser_access_token", "value": "" },
+    { "key": "superuser_refresh_token", "value": "" },
+    { "key": "owner_email", "value": "" },
+    { "key": "owner_password", "value": "" },
+    { "key": "owner_id", "value": "" },
+    { "key": "owner_access_token", "value": "" },
+    { "key": "owner_refresh_token", "value": "" },
+    { "key": "alice_email", "value": "" },
+    { "key": "alice_password", "value": "" },
+    { "key": "alice_id", "value": "" },
+    { "key": "alice_access_token", "value": "" },
+    { "key": "alice_refresh_token", "value": "" },
+    { "key": "bob_email", "value": "" },
+    { "key": "bob_password", "value": "" },
+    { "key": "bob_id", "value": "" },
+    { "key": "bob_access_token", "value": "" },
+    { "key": "bob_refresh_token", "value": "" },
+    { "key": "org_slug", "value": "" },
+    { "key": "organization_id", "value": "" },
+    { "key": "engineering_group_id", "value": "" },
+    { "key": "alice_membership_id", "value": "" },
+    { "key": "bob_membership_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Setup",
+      "item": [
+        {
+          "name": "Login Superuser",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Superuser login succeeded', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('superuser_access_token', body.access_token);",
+                  "pm.collectionVariables.set('superuser_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{superuser_email}}\",\n  \"password\": \"{{superuser_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Requires the account named by superuser_email/superuser_password to already exist with is_superuser=true. Used only to bootstrap the organization below; every group-memberships request after Setup uses owner/alice/bob tokens instead."
+          }
+        },
+        {
+          "name": "Register Owner (John Smith, CEO)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('owner_email', 'john.ceo.' + ts + '@apple-corp.example.com');",
+                  "pm.collectionVariables.set('owner_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Registered', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('owner_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"{{owner_password}}\",\n  \"full_name\": \"John Smith\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            },
+            "description": "scripts/dummy.json usr_apple_owner_001."
+          }
+        },
+        {
+          "name": "Create Organization — Apple Corp (superuser)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('org_slug', 'apple-corp-gm-' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('organization_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Apple Corp\",\n  \"slug\": \"{{org_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations"]
+            },
+            "description": "scripts/dummy.json's tenant_apple_001 — slug is timestamp-suffixed (and namespaced '-gm-') so this collection can bootstrap its own tenant independently of ../groups."
+          }
+        },
+        {
+          "name": "Add Owner To Organization (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{owner_id}}\",\n  \"role_code\": \"owner\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_id}}/members",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_id}}", "members"]
+            }
+          }
+        },
+        {
+          "name": "Login Owner (tenant-bound)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, bound to Apple Corp', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    // tenant_id isn't duplicated in body.user.tenant — it's already",
+                  "    // the access token's own tenant_id claim.",
+                  "    var claims = JSON.parse(atob(body.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                  "    pm.expect(claims.tenant_id).to.equal(pm.collectionVariables.get('org_slug'));",
+                  "});",
+                  "pm.collectionVariables.set('owner_access_token', body.access_token);",
+                  "pm.collectionVariables.set('owner_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"{{owner_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "Create Group — Engineering (owner)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('engineering_group_id', pm.response.json().group.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Engineering\",\n  \"attributes\": {\n    \"department\": \"Engineering\",\n    \"region\": \"USA\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/groups",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "groups"]
+            },
+            "description": "scripts/dummy.json grp_eng — see ../groups for the full Groups CRUD collection; this is just enough setup for Alice/Bob to join below."
+          }
+        },
+        {
+          "name": "Register Alice Miller (Software Engineer)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('alice_email', 'alice.' + ts + '@apple-corp.example.com');",
+                  "pm.collectionVariables.set('alice_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Registered', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('alice_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{alice_email}}\",\n  \"password\": \"{{alice_password}}\",\n  \"full_name\": \"Alice Miller\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            },
+            "description": "scripts/dummy.json usr_apple_mem_001."
+          }
+        },
+        {
+          "name": "Add Alice To Organization (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{alice_id}}\",\n  \"role_code\": \"member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_id}}/members",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_id}}", "members"]
+            }
+          }
+        },
+        {
+          "name": "Login Alice (tenant-bound)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK', function () { pm.expect(pm.response.code).to.equal(200); });",
+                  "pm.collectionVariables.set('alice_access_token', body.access_token);",
+                  "pm.collectionVariables.set('alice_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{alice_email}}\",\n  \"password\": \"{{alice_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "Register Bob Davis (Backend Engineer)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('bob_email', 'bob.' + ts + '@apple-corp.example.com');",
+                  "pm.collectionVariables.set('bob_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Registered', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('bob_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{bob_email}}\",\n  \"password\": \"{{bob_password}}\",\n  \"full_name\": \"Bob Davis\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            },
+            "description": "scripts/dummy.json usr_apple_mem_002. Not yet added to the organization — see folder 1 > Create Membership — Forbidden, which deliberately exercises this before Bob is an org member at all."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Create & Read",
+      "item": [
+        {
+          "name": "Create Membership — Alice joins Engineering",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created, matches the spec example', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    var m = body.membership;",
+                  "    pm.expect(m.user_id).to.equal(pm.collectionVariables.get('alice_id'));",
+                  "    pm.expect(m.group_id).to.equal(pm.collectionVariables.get('engineering_group_id'));",
+                  "    pm.expect(m.tenant_id).to.equal(pm.collectionVariables.get('org_slug'));",
+                  "    pm.expect(m.membership_type).to.equal('DIRECT');",
+                  "    pm.expect(m.role).to.equal('MEMBER');",
+                  "    pm.expect(m.status).to.equal('ACTIVE');",
+                  "    pm.expect(m.attributes.access_level).to.equal('standard');",
+                  "    pm.expect(m.attributes.temporary).to.equal(false);",
+                  "});",
+                  "pm.collectionVariables.set('alice_membership_id', body.membership.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{alice_id}}\",\n  \"group_id\": \"{{engineering_group_id}}\",\n  \"membership_type\": \"DIRECT\",\n  \"role\": \"MEMBER\",\n  \"attributes\": {\n    \"access_level\": \"standard\",\n    \"temporary\": false\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships"]
+            },
+            "description": "Reproduces groups-group-memberships-api-spec's own Create Membership example verbatim. No tenant_id needed — owner_access_token's session is already bound to org_slug, and it's validated against the group's own tenant either way."
+          }
+        },
+        {
+          "name": "Create Membership — Duplicate (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('409 Conflict', function () { pm.response.to.have.status(409); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{alice_id}}\",\n  \"group_id\": \"{{engineering_group_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships"]
+            },
+            "description": "Alice already has a membership for Engineering — at most one membership per (group, user) pair."
+          }
+        },
+        {
+          "name": "Create Membership — Forbidden For Non-Owner (Alice adds Bob)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('403 Forbidden', function () { pm.response.to.have.status(403); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{alice_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{bob_id}}\",\n  \"group_id\": \"{{engineering_group_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships"]
+            },
+            "description": "Alice is a member of Engineering but not Apple Corp's owner — adding members to a group is a tenant-admin action, same gate as managing the group itself."
+          }
+        },
+        {
+          "name": "Create Membership — Unknown Group (expect 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('404 Not Found', function () { pm.response.to.have.status(404); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{bob_id}}\",\n  \"group_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships"]
+            }
+          }
+        },
+        {
+          "name": "Add Bob To Organization (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{bob_id}}\",\n  \"role_code\": \"member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_id}}/members",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_id}}", "members"]
+            },
+            "description": "Org membership isn't actually required to *be added to a group* (only the actor adding someone needs to be the tenant owner) — done here just so Bob can log in and exercise the self-or-superuser list/get checks below."
+          }
+        },
+        {
+          "name": "Login Bob (tenant-bound)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK', function () { pm.expect(pm.response.code).to.equal(200); });",
+                  "pm.collectionVariables.set('bob_access_token', body.access_token);",
+                  "pm.collectionVariables.set('bob_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{bob_email}}\",\n  \"password\": \"{{bob_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "Create Membership — Bob joins Engineering",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('bob_membership_id', body.membership.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{bob_id}}\",\n  \"group_id\": \"{{engineering_group_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships"]
+            }
+          }
+        },
+        {
+          "name": "Group Member Count Reflects Both Memberships",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('member_count is 2', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().group.member_count).to.equal(2);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/groups/{{engineering_group_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "groups", "{{engineering_group_id}}"]
+            }
+          }
+        },
+        {
+          "name": "List Memberships By Group",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, both memberships listed', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.total).to.equal(2);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships?group_id={{engineering_group_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships"],
+              "query": [{ "key": "group_id", "value": "{{engineering_group_id}}" }]
+            },
+            "description": "Listing by group_id requires at least membership in that group's tenant — owner's token (and Alice's/Bob's, since they're org members) all work here."
+          }
+        },
+        {
+          "name": "List Memberships By Self (Alice)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, just Alice\\'s own membership', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.total).to.equal(1);",
+                  "    pm.expect(body.memberships[0].user_id).to.equal(pm.collectionVariables.get('alice_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{alice_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships?user_id={{alice_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships"],
+              "query": [{ "key": "user_id", "value": "{{alice_id}}" }]
+            }
+          }
+        },
+        {
+          "name": "List Memberships By Other User — Forbidden (Alice queries Bob)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('403 Forbidden', function () { pm.response.to.have.status(403); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{alice_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships?user_id={{bob_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships"],
+              "query": [{ "key": "user_id", "value": "{{bob_id}}" }]
+            },
+            "description": "Filtering by user_id alone (no group_id) is self-or-superuser only."
+          }
+        },
+        {
+          "name": "Get Membership By ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().membership.id).to.equal(pm.collectionVariables.get('alice_membership_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{bob_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships/{{alice_membership_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships", "{{alice_membership_id}}"]
+            },
+            "description": "Reads by id are open to any authenticated user, not just the owner — Bob's token works here even though it's Alice's membership."
+          }
+        },
+        {
+          "name": "Get Membership By ID — Unknown (expect 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('404 Not Found', function () { pm.response.to.have.status(404); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships/00000000-0000-0000-0000-000000000000",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships", "00000000-0000-0000-0000-000000000000"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Update & Delete",
+      "item": [
+        {
+          "name": "Update Membership — Promote Alice To ADMIN",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.membership.role).to.equal('ADMIN');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"ADMIN\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships/{{alice_membership_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships", "{{alice_membership_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Update Membership — Forbidden For Non-Owner (Bob updates himself)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('403 Forbidden', function () { pm.response.to.have.status(403); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{bob_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"ADMIN\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships/{{bob_membership_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships", "{{bob_membership_id}}"]
+            },
+            "description": "Even a membership's own holder can't self-promote — only the tenant owner (or a superuser) can update a membership."
+          }
+        },
+        {
+          "name": "Update Membership — Deactivate Alice",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, INACTIVE', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.membership.status).to.equal('INACTIVE');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"INACTIVE\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships/{{alice_membership_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships", "{{alice_membership_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Group Member Count Drops To 1 After Deactivation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('member_count is 1 (Alice no longer ACTIVE)', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().group.member_count).to.equal(1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/groups/{{engineering_group_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "groups", "{{engineering_group_id}}"]
+            },
+            "description": "member_count only counts ACTIVE memberships — Bob's is still active, Alice's no longer is."
+          }
+        },
+        {
+          "name": "Delete Membership — Remove Bob",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ success: true, message: 'Group membership deleted successfully' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/group-memberships/{{bob_membership_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "group-memberships", "{{bob_membership_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Group Member Count Drops To 0 After Deletion",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('member_count is 0', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().group.member_count).to.equal(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/groups/{{engineering_group_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "groups", "{{engineering_group_id}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Cleanup",
+      "item": [
+        {
+          "name": "Delete Organization (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('204 No Content', function () { pm.response.to.have.status(204); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_id}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

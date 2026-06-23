@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 from app.api.v1.dependencies import get_token_cache
-from app.infrastructure.db.models.user import User
-from app.infrastructure.security.token_cache import InMemoryTokenCache
+from app.modules.auth.utils.oauth import InMemoryTokenCache
+from app.modules.users.models import User
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -136,9 +136,7 @@ async def test_org_admin_can_list_only_same_tenant_users(client_ctx, db_session)
     """GET /users for a non-superuser org admin/owner is scoped to their own
     tenant — not the platform-wide listing superusers get."""
     owner_token = await _register_and_login(client_ctx, "tlowner@example.com")
-    org = await _create_org(
-        client_ctx, db_session, owner_token, email="tlowner@example.com", slug="tl-org-a"
-    )
+    org = await _create_org(client_ctx, db_session, owner_token, email="tlowner@example.com", slug="tl-org-a")
 
     admin_token = await _register_and_login(client_ctx, "tladmin@example.com")
     admin_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(admin_token))).json()["id"]
@@ -162,9 +160,7 @@ async def test_org_admin_can_list_only_same_tenant_users(client_ctx, db_session)
     # A second, unrelated tenant with its own user — must never show up in
     # tl-org-a's admin's listing.
     other_owner_token = await _register_and_login(client_ctx, "tlother@example.com")
-    await _create_org(
-        client_ctx, db_session, other_owner_token, email="tlother@example.com", slug="tl-org-b"
-    )
+    await _create_org(client_ctx, db_session, other_owner_token, email="tlother@example.com", slug="tl-org-b")
 
     response = await client_ctx.get("/api/v1/users", headers=_auth(admin_token))
     assert response.status_code == 200
@@ -339,9 +335,7 @@ async def test_activate_deactivate_user(client_ctx, db_session):
     assert reactivated.json()["is_active"] is True
 
 
-@pytest.mark.parametrize(
-    "new_status", ["INACTIVE", "SUSPENDED", "LOCKED", "PENDING_VERIFICATION", "DELETED"]
-)
+@pytest.mark.parametrize("new_status", ["INACTIVE", "SUSPENDED", "LOCKED", "PENDING_VERIFICATION", "DELETED"])
 async def test_update_user_status_blocks_access_for_every_non_active_value(
     client_ctx, db_session, new_status
 ):
@@ -632,9 +626,7 @@ async def test_remove_user_from_tenant_by_owner(client_ctx, db_session):
         headers=_auth(owner_token),
     )
 
-    resp = await client_ctx.delete(
-        f"/api/v1/users/{member_id}/tenants/rft-org-b", headers=_auth(owner_token)
-    )
+    resp = await client_ctx.delete(f"/api/v1/users/{member_id}/tenants/rft-org-b", headers=_auth(owner_token))
     assert resp.status_code == 200, resp.text
 
 
@@ -665,9 +657,7 @@ async def test_remove_user_from_tenant_last_owner_protected(client_ctx, db_sessi
     owner_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(owner_token))).json()["id"]
     await _create_org(client_ctx, db_session, owner_token, email="owner-rft4@example.com", slug="rft-org-d")
 
-    resp = await client_ctx.delete(
-        f"/api/v1/users/{owner_id}/tenants/rft-org-d", headers=_auth(owner_token)
-    )
+    resp = await client_ctx.delete(f"/api/v1/users/{owner_id}/tenants/rft-org-d", headers=_auth(owner_token))
     assert resp.status_code == 409
 
 
@@ -679,6 +669,126 @@ async def test_remove_user_from_unknown_tenant_returns_404(client_ctx, db_sessio
         f"/api/v1/users/{owner_id}/tenants/no-such-tenant", headers=_auth(owner_token)
     )
     assert resp.status_code == 404
+
+
+async def test_add_user_to_tenant_by_owner(client_ctx, db_session):
+    owner_token = await _register_and_login(client_ctx, "owner-att1@example.com")
+    member_token = await _register_and_login(client_ctx, "member-att1@example.com")
+    member_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))).json()["id"]
+    await _create_org(client_ctx, db_session, owner_token, email="owner-att1@example.com", slug="att-org-a")
+
+    resp = await client_ctx.post(
+        f"/api/v1/users/{member_id}/tenants",
+        json={"tenant_id": "att-org-a", "role": "MEMBER"},
+        headers=_auth(owner_token),
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json() == {"success": True, "tenant_id": "att-org-a"}
+
+    joined = await client_ctx.get(
+        "/api/v1/users/me", params={"tenant_id": "att-org-a"}, headers=_auth(member_token)
+    )
+    assert joined.status_code == 200
+
+
+async def test_add_user_to_tenant_forbidden_for_non_owner(client_ctx, db_session):
+    owner_token = await _register_and_login(client_ctx, "owner-att2@example.com")
+    member_a_token = await _register_and_login(client_ctx, "member-a-att2@example.com")
+    member_a_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_a_token))).json()["id"]
+    member_b_token = await _register_and_login(client_ctx, "member-b-att2@example.com")
+    member_b_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_b_token))).json()["id"]
+    org = await _create_org(
+        client_ctx, db_session, owner_token, email="owner-att2@example.com", slug="att-org-b"
+    )
+    await client_ctx.post(
+        f"/api/v1/organizations/{org['id']}/members",
+        json={"user_id": member_a_id, "role_code": "member"},
+        headers=_auth(owner_token),
+    )
+
+    resp = await client_ctx.post(
+        f"/api/v1/users/{member_b_id}/tenants",
+        json={"tenant_id": "att-org-b", "role": "member"},
+        headers=_auth(member_a_token),
+    )
+    assert resp.status_code == 403
+
+
+async def test_add_user_to_tenant_unknown_role_returns_404(client_ctx, db_session):
+    owner_token = await _register_and_login(client_ctx, "owner-att3@example.com")
+    member_token = await _register_and_login(client_ctx, "member-att3@example.com")
+    member_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))).json()["id"]
+    await _create_org(client_ctx, db_session, owner_token, email="owner-att3@example.com", slug="att-org-c")
+
+    resp = await client_ctx.post(
+        f"/api/v1/users/{member_id}/tenants",
+        json={"tenant_id": "att-org-c", "role": "no-such-role"},
+        headers=_auth(owner_token),
+    )
+    assert resp.status_code == 404
+
+
+async def test_add_user_to_unknown_tenant_returns_404(client_ctx, db_session):
+    owner_token = await _register_and_login(client_ctx, "owner-att4@example.com")
+    owner_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(owner_token))).json()["id"]
+
+    resp = await client_ctx.post(
+        f"/api/v1/users/{owner_id}/tenants",
+        json={"tenant_id": "no-such-tenant", "role": "member"},
+        headers=_auth(owner_token),
+    )
+    assert resp.status_code == 404
+
+
+async def test_assign_and_remove_global_user_role(client_ctx, db_session):
+    admin_token = await _register_and_login(client_ctx, "admin-aur1@example.com")
+    member_token = await _register_and_login(client_ctx, "member-aur1@example.com")
+    member_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(member_token))).json()["id"]
+
+    await _make_superuser(db_session, "admin-aur1@example.com")
+    seeded = await client_ctx.post("/api/v1/roles/seed", headers=_auth(admin_token))
+    assert seeded.status_code == 200, seeded.text
+    member_role_id = next(r["id"] for r in seeded.json() if r["code"] == "member")
+
+    assign_resp = await client_ctx.post(
+        f"/api/v1/users/{member_id}/roles",
+        json={"role": "MEMBER"},
+        headers=_auth(admin_token),
+    )
+    assert assign_resp.status_code == 201, assign_resp.text
+    assert assign_resp.json() == {
+        "user_id": member_id,
+        "role": "member",
+        "message": "Role assigned successfully",
+    }
+
+    duplicate = await client_ctx.post(
+        f"/api/v1/users/{member_id}/roles",
+        json={"role": "member"},
+        headers=_auth(admin_token),
+    )
+    assert duplicate.status_code == 409
+
+    remove_resp = await client_ctx.delete(
+        f"/api/v1/users/{member_id}/roles/{member_role_id}",
+        headers=_auth(admin_token),
+    )
+    assert remove_resp.status_code == 200
+    assert remove_resp.json() == {"success": True, "message": "Role removed successfully"}
+    await _set_superuser(db_session, "admin-aur1@example.com", False)
+
+
+async def test_assign_user_role_requires_superuser(client_ctx, db_session):
+    requester_token = await _register_and_login(client_ctx, "requester-aur2@example.com")
+    target_token = await _register_and_login(client_ctx, "target-aur2@example.com")
+    target_id = (await client_ctx.get("/api/v1/users/me", headers=_auth(target_token))).json()["id"]
+
+    resp = await client_ctx.post(
+        f"/api/v1/users/{target_id}/roles",
+        json={"role": "member"},
+        headers=_auth(requester_token),
+    )
+    assert resp.status_code == 403
 
 
 async def test_delete_organization_requires_owner(client_ctx, db_session):

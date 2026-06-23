@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from sqlalchemy import select
 
 
@@ -88,7 +88,7 @@ class TestAdminCreateUser:
     @pytest.mark.anyio
     async def test_non_superuser_is_forbidden(self, client, db_session):
         owner_token = await _login_token(client, (await _register(client, "owner10@test.com"))["email"])
-        await _create_org(client, db_session, owner_token, name="B", slug="tenant-b-admin")
+        await _create_org(client, db_session, owner_token, name="BB", slug="tenant-b-admin")
 
         resp = await client.post(
             "/api/v1/admin/users",
@@ -127,7 +127,7 @@ class TestAdminCreateUser:
     async def test_unknown_role_returns_404(self, client, db_session):
         super_token = await _superuser_token(client, db_session, "root3@test.com")
         owner_token = await _login_token(client, (await _register(client, "owner11@test.com"))["email"])
-        await _create_org(client, db_session, owner_token, name="C", slug="tenant-c-admin")
+        await _create_org(client, db_session, owner_token, name="CC", slug="tenant-c-admin")
 
         resp = await client.post(
             "/api/v1/admin/users",
@@ -144,7 +144,7 @@ class TestAdminCreateUser:
     async def test_duplicate_email_returns_409(self, client, db_session):
         super_token = await _superuser_token(client, db_session, "root4@test.com")
         owner_token = await _login_token(client, (await _register(client, "owner12@test.com"))["email"])
-        await _create_org(client, db_session, owner_token, name="D", slug="tenant-d-admin")
+        await _create_org(client, db_session, owner_token, name="DD", slug="tenant-d-admin")
         await _register(client, "dup@test.com")
 
         resp = await client.post(
@@ -165,7 +165,7 @@ class TestAdminCreateUser:
         is set server-side (via the DB) and is cleared by change-password."""
         super_token = await _superuser_token(client, db_session, "root5@test.com")
         owner_token = await _login_token(client, (await _register(client, "owner13@test.com"))["email"])
-        await _create_org(client, db_session, owner_token, name="E", slug="tenant-e-admin")
+        await _create_org(client, db_session, owner_token, name="EE", slug="tenant-e-admin")
 
         resp = await client.post(
             "/api/v1/admin/users",

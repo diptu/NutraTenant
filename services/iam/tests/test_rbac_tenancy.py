@@ -6,12 +6,17 @@ Updated to the current DDD architecture and contract:
     same underlying security property (granting a role with permissions
     you don't hold gets refused) using a custom org-scoped role with
     attached permissions instead of a hardcoded "org_admin" tier.
-  - Field/response names follow this codebase's convention: `role_code`
-    (flat), not a nested `{"role": {"slug": ...}}`; `organization_id` in
-    the role-create payload, not a separate org-scoped endpoint.
   - `GET /organizations` returns a plain list, not a `{items: [...]}`
     envelope (changing that would break the already-tested current
     behavior elsewhere).
+  - Role CRUD (POST/GET/PUT/DELETE /roles, .../permissions) follows
+    Role_API_Specification_Extended.md: `slug` (not `code`), a tenant is
+    resolved from the caller's session (`claims.tenant_id`) or an explicit
+    `tenant_id` in the request — there's no `organization_id` field anymore.
+    Responses are wrapped (`{"role": {...}}` / `{"message": ..., "role": {...}}`).
+    `owner_token` fixtures here log in *before* their organization exists, so
+    most of these tests pass `tenant_id` explicitly rather than relying on
+    session auto-binding.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 import pytest
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from sqlalchemy import select
 
 # ---------------------------------------------------------------------------
@@ -156,7 +161,7 @@ class TestCreateOrganization:
 
     @pytest.mark.anyio
     async def test_unauthenticated_cannot_create(self, client) -> None:
-        resp = await client.post("/api/v1/organizations", json={"name": "X", "slug": "no-auth"})
+        resp = await client.post("/api/v1/organizations", json={"name": "XX", "slug": "no-auth"})
         assert resp.status_code == 401
 
 
@@ -223,6 +228,29 @@ class TestUpdateOrganization:
         )
         assert resp.status_code == 403
 
+    @pytest.mark.anyio
+    async def test_owner_cannot_set_is_reserved(self, client, organization, owner_token) -> None:
+        resp = await client.patch(
+            f"/api/v1/organizations/{organization['id']}",
+            json={"is_reserved": True},
+            headers=_auth(owner_token),
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_superuser_can_set_is_reserved(
+        self, client, db_session, organization, owner, owner_token
+    ) -> None:
+        await _make_superuser(db_session, owner["id"])
+        resp = await client.patch(
+            f"/api/v1/organizations/{organization['id']}",
+            json={"is_reserved": True},
+            headers=_auth(owner_token),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_reserved"] is True
+        await _set_superuser(db_session, owner["id"], False)
+
 
 class TestDeleteOrganization:
     @pytest.mark.anyio
@@ -242,6 +270,30 @@ class TestDeleteOrganization:
 
         resp = await client.delete(f"/api/v1/organizations/{organization['id']}", headers=_auth(member_token))
         assert resp.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_reserved_organization_cannot_be_deleted_even_by_owner(
+        self, client, db_session, organization, owner, owner_token
+    ) -> None:
+        await _make_superuser(db_session, owner["id"])
+        reserved = await client.patch(
+            f"/api/v1/organizations/{organization['id']}",
+            json={"is_reserved": True},
+            headers=_auth(owner_token),
+        )
+        assert reserved.status_code == 200
+        await _set_superuser(db_session, owner["id"], False)
+
+        resp = await client.delete(f"/api/v1/organizations/{organization['id']}", headers=_auth(owner_token))
+        assert resp.status_code == 403
+
+        # Still there, and a superuser can't bypass the protection either.
+        await _make_superuser(db_session, owner["id"])
+        resp_superuser = await client.delete(
+            f"/api/v1/organizations/{organization['id']}", headers=_auth(owner_token)
+        )
+        assert resp_superuser.status_code == 403
+        await _set_superuser(db_session, owner["id"], False)
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +439,7 @@ class TestRoleAssignmentGuard:
         outsider,
         db_session,
     ) -> None:
-        from app.services.rbac_seed import seed_rbac_catalog
+        from app.core.rbac_seed import seed_rbac_catalog
 
         await seed_rbac_catalog(db_session)
 
@@ -395,17 +447,17 @@ class TestRoleAssignmentGuard:
             "/api/v1/roles",
             json={
                 "name": "Billing",
-                "code": "billing",
-                "organization_id": organization["id"],
+                "slug": "billing",
+                "tenant_id": organization["slug"],
             },
             headers=_auth(owner_token),
         )
         assert custom.status_code == 201, custom.text
-        custom_role_id = custom.json()["id"]
+        custom_role_id = custom.json()["role"]["id"]
 
         attach = await client.post(
             f"/api/v1/roles/{custom_role_id}/permissions",
-            json={"permission_codes": ["organizations:read"]},
+            json={"permissions": ["organizations:read"]},
             headers=_auth(owner_token),
         )
         assert attach.status_code == 200, attach.text
@@ -434,7 +486,7 @@ class TestRoleAssignmentGuard:
         outsider,
         db_session,
     ) -> None:
-        from app.services.rbac_seed import seed_rbac_catalog
+        from app.core.rbac_seed import seed_rbac_catalog
 
         await seed_rbac_catalog(db_session)
 
@@ -443,14 +495,14 @@ class TestRoleAssignmentGuard:
             "/api/v1/roles",
             json={
                 "name": "Narrow",
-                "code": "narrow",
-                "organization_id": organization["id"],
+                "slug": "narrow",
+                "tenant_id": organization["slug"],
             },
             headers=_auth(owner_token),
         )
         await client.post(
-            f"/api/v1/roles/{narrow.json()['id']}/permissions",
-            json={"permission_codes": ["organizations:read"]},
+            f"/api/v1/roles/{narrow.json()['role']['id']}/permissions",
+            json={"permissions": ["organizations:read"]},
             headers=_auth(owner_token),
         )
 
@@ -459,14 +511,14 @@ class TestRoleAssignmentGuard:
             "/api/v1/roles",
             json={
                 "name": "Wide",
-                "code": "wide",
-                "organization_id": organization["id"],
+                "slug": "wide",
+                "tenant_id": organization["slug"],
             },
             headers=_auth(owner_token),
         )
         await client.post(
-            f"/api/v1/roles/{wide.json()['id']}/permissions",
-            json={"permission_codes": ["organizations:delete"]},
+            f"/api/v1/roles/{wide.json()['role']['id']}/permissions",
+            json={"permissions": ["organizations:delete"]},
             headers=_auth(owner_token),
         )
 
@@ -492,17 +544,20 @@ class TestRoleManagement:
         await _make_superuser(db_session, owner["id"])
         resp = await client.post(
             "/api/v1/roles",
-            json={"name": "Auditor Plus", "code": "auditor_plus"},
+            json={"name": "Auditor Plus", "slug": "auditor_plus"},
             headers=_auth(owner_token),
         )
         assert resp.status_code == 201, resp.text
-        assert resp.json()["organization_id"] is None
+        assert resp.json()["role"]["tenant_id"] is None
 
     @pytest.mark.anyio
     async def test_non_superuser_cannot_create_global_role(self, client, owner_token) -> None:
+        # `owner_token` belongs to no organization at all here (the
+        # `organization` fixture isn't requested) — claims.tenant_id is None,
+        # so omitting tenant_id resolves to "create a global role", superuser-only.
         resp = await client.post(
             "/api/v1/roles",
-            json={"name": "Sneaky Global", "code": "sneaky_global"},
+            json={"name": "Sneaky Global", "slug": "sneaky_global"},
             headers=_auth(owner_token),
         )
         assert resp.status_code == 403
@@ -516,8 +571,8 @@ class TestRoleManagement:
             "/api/v1/roles",
             json={
                 "name": "Shadow Role",
-                "code": "shadow_role",
-                "organization_id": organization["id"],
+                "slug": "shadow_role",
+                "tenant_id": organization["slug"],
             },
             headers=_auth(member_token),
         )
@@ -529,8 +584,8 @@ class TestRoleManagement:
     ) -> None:
         payload = {
             "name": "Reviewer",
-            "code": "reviewer",
-            "organization_id": organization["id"],
+            "slug": "reviewer",
+            "tenant_id": organization["slug"],
         }
         resp1 = await client.post("/api/v1/roles", json=payload, headers=_auth(owner_token))
         assert resp1.status_code == 201, resp1.text
@@ -549,8 +604,8 @@ class TestRoleManagement:
             "/api/v1/roles",
             json={
                 "name": "Manager",
-                "code": "manager",
-                "organization_id": organization["id"],
+                "slug": "manager",
+                "tenant_id": organization["slug"],
             },
             headers=_auth(owner_token),
         )
@@ -560,20 +615,23 @@ class TestRoleManagement:
             "/api/v1/roles",
             json={
                 "name": "Manager",
-                "code": "manager",
-                "organization_id": other_org["id"],
+                "slug": "manager",
+                "tenant_id": other_org["slug"],
             },
             headers=_auth(other_owner_token),
         )
         assert resp2.status_code == 201, resp2.text
 
     @pytest.mark.anyio
-    async def test_cannot_delete_system_role(self, client, organization, owner, owner_token) -> None:
-        resp = await client.get("/api/v1/roles", headers=_auth(owner_token))
-        assert resp.status_code == 200
-        # "owner"/"member" are global-catalog-listed only when global; this
-        # organization's auto-provisioned owner role is org-scoped, so fetch
-        # it via the members listing instead.
+    async def test_role_listing_is_tenant_scoped(self, client, organization, owner, owner_token) -> None:
+        """GET /roles with no override lists the *global* catalog for a
+        caller with no session tenant context; passing tenant_id explicitly
+        (needed here since owner_token predates the org's creation) lists
+        that tenant's own roles instead — including its auto-provisioned
+        "owner" role, which only ever exists org-scoped, never globally."""
+        global_resp = await client.get("/api/v1/roles", headers=_auth(owner_token))
+        assert global_resp.status_code == 403  # no tenant context, not a superuser
+
         members = await client.get(
             f"/api/v1/organizations/{organization['id']}/members",
             headers=_auth(owner_token),
@@ -581,9 +639,14 @@ class TestRoleManagement:
         owner_membership = next(m for m in members.json() if m["user_id"] == owner["id"])
         assert owner_membership["role_code"] == "owner"
 
-        roles_resp = await client.get("/api/v1/roles", headers=_auth(owner_token))
-        global_codes = {r["code"] for r in roles_resp.json()}
-        assert "owner" not in global_codes  # confirms it really is org-scoped, not global
+        tenant_resp = await client.get(
+            "/api/v1/roles",
+            params={"tenant_id": organization["slug"]},
+            headers=_auth(owner_token),
+        )
+        assert tenant_resp.status_code == 200
+        tenant_codes = {r["slug"] for r in tenant_resp.json()["roles"]}
+        assert "owner" in tenant_codes
 
     @pytest.mark.anyio
     async def test_cannot_delete_role_currently_assigned_to_a_member(
@@ -593,13 +656,13 @@ class TestRoleManagement:
             "/api/v1/roles",
             json={
                 "name": "In Use Role",
-                "code": "in_use_role",
-                "organization_id": organization["id"],
+                "slug": "in_use_role",
+                "tenant_id": organization["slug"],
             },
             headers=_auth(owner_token),
         )
         assert resp.status_code == 201, resp.text
-        role = resp.json()
+        role = resp.json()["role"]
 
         resp = await _add_member(
             client,

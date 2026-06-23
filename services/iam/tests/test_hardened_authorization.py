@@ -15,11 +15,11 @@ from app.api.v1.dependencies import get_token_cache, require_global_role
 from app.core.config import get_settings
 from app.core.context_middleware import is_in_corporate_range
 from app.domain.exceptions import ForbiddenError
-from app.infrastructure.db.models.password_reset_token import PasswordResetToken
-from app.infrastructure.db.models.policy_evaluation_log import PolicyEvaluationLog
-from app.infrastructure.db.models.user import User
-from app.infrastructure.security.reset_token import hash_reset_token
-from app.infrastructure.security.token_cache import InMemoryTokenCache
+from app.modules.auth.models import PasswordResetToken
+from app.modules.auth.utils.oauth import InMemoryTokenCache
+from app.modules.auth.utils.tokens import hash_reset_token
+from app.modules.policies.models import PolicyEvaluationLog
+from app.modules.users.models import User
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -247,24 +247,25 @@ async def test_create_update_delete_custom_role(client_ctx, db_session):
         "/api/v1/roles",
         json={
             "name": "Auditor",
-            "code": "auditor",
+            "slug": "auditor",
             "description": "Read-only audit access",
         },
         headers=_auth(admin_token),
     )
     assert create.status_code == 201
-    role_id = create.json()["id"]
+    role_id = create.json()["role"]["id"]
 
-    update = await client_ctx.patch(
+    update = await client_ctx.put(
         f"/api/v1/roles/{role_id}",
         json={"description": "Updated"},
         headers=_auth(admin_token),
     )
     assert update.status_code == 200
-    assert update.json()["description"] == "Updated"
+    assert update.json()["role"]["description"] == "Updated"
 
     delete = await client_ctx.delete(f"/api/v1/roles/{role_id}", headers=_auth(admin_token))
-    assert delete.status_code == 204
+    assert delete.status_code == 200
+    assert delete.json() == {"success": True, "message": "Role deleted successfully"}
 
 
 async def test_system_role_cannot_be_modified_or_deleted(client_ctx, db_session):
@@ -272,7 +273,7 @@ async def test_system_role_cannot_be_modified_or_deleted(client_ctx, db_session)
     await _make_superuser(db_session, "admin@example.com")
     roles = await _seed_roles(client_ctx, admin_token)
 
-    forbidden_update = await client_ctx.patch(
+    forbidden_update = await client_ctx.put(
         f"/api/v1/roles/{roles['admin']}",
         json={"description": "hijacked"},
         headers=_auth(admin_token),
@@ -385,9 +386,9 @@ async def test_pdp_allows_when_unconditional_allow_policy_matches(client_ctx, db
         client_ctx,
         admin_token,
         name="allow-read-document",
-        effect="allow",
-        resource="document",
-        action="read",
+        effect="ALLOW",
+        resource_types=["document"],
+        actions=["read"],
     )
 
     token = await _register_and_login(client_ctx, "alice@example.com")
@@ -407,17 +408,17 @@ async def test_pdp_deny_overrides_conflicting_allow(client_ctx, db_session):
         client_ctx,
         admin_token,
         name="allow-read-document",
-        effect="allow",
-        resource="document",
-        action="read",
+        effect="ALLOW",
+        resource_types=["document"],
+        actions=["read"],
     )
     await _create_policy(
         client_ctx,
         admin_token,
         name="deny-read-document",
-        effect="deny",
-        resource="document",
-        action="read",
+        effect="DENY",
+        resource_types=["document"],
+        actions=["read"],
     )
 
     token = await _register_and_login(client_ctx, "alice@example.com")
@@ -437,9 +438,9 @@ async def test_pdp_wildcard_deny_blocks_everything(client_ctx, db_session):
         client_ctx,
         admin_token,
         name="deny-everything",
-        effect="deny",
-        resource="*",
-        action="*",
+        effect="DENY",
+        resource_types=["*"],
+        actions=["*"],
     )
 
     token = await _register_and_login(client_ctx, "alice@example.com")
@@ -467,9 +468,9 @@ async def test_pdp_condition_matches_subject_department_against_resource(client_
         client_ctx,
         admin_token,
         name="dept-match-allow",
-        effect="allow",
-        resource="document",
-        action="read",
+        effect="ALLOW",
+        resource_types=["document"],
+        actions=["read"],
         conditions={
             "op": "eq",
             "left": {"var": "subject.attributes.department"},
@@ -507,9 +508,9 @@ async def test_pdp_context_bound_corporate_ip_condition(client_ctx, db_session, 
         client_ctx,
         admin_token,
         name="corporate-network-only",
-        effect="allow",
-        resource="vpn",
-        action="connect",
+        effect="ALLOW",
+        resource_types=["vpn"],
+        actions=["connect"],
         conditions={
             "op": "eq",
             "left": {"var": "context.ip_in_corporate_range"},
@@ -543,9 +544,9 @@ async def test_policy_evaluation_trace_persisted_accurately(client_ctx, db_sessi
         client_ctx,
         admin_token,
         name="allow-read-document",
-        effect="allow",
-        resource="document",
-        action="read",
+        effect="ALLOW",
+        resource_types=["document"],
+        actions=["read"],
     )
 
     alice_token = await _register_and_login(client_ctx, "alice@example.com")
@@ -568,7 +569,7 @@ async def test_policy_evaluation_trace_persisted_accurately(client_ctx, db_sessi
     assert log_row.resource_type == "document"
     assert log_row.action == "read"
     assert log_row.subject_snapshot["id"] == alice_id
-    assert log_row.matched_policies[0]["policy_id"] == policy["id"]
+    assert log_row.matched_policies[0]["policy_id"] == policy["policy_id"]
     assert log_row.matched_policies[0]["matched"] is True
     assert "ip_address" in log_row.context_snapshot
 
@@ -580,9 +581,9 @@ async def test_create_policy_with_malformed_conditions_rejected(client_ctx, db_s
         "/api/v1/policies",
         json={
             "name": "broken",
-            "effect": "allow",
-            "resource": "document",
-            "action": "read",
+            "effect": "ALLOW",
+            "resource_types": ["document"],
+            "actions": ["read"],
             "conditions": {"op": "not-a-real-op", "left": 1, "right": 2},
         },
         headers=_auth(admin_token),
@@ -597,17 +598,17 @@ async def test_duplicate_policy_name_rejected(client_ctx, db_session):
         client_ctx,
         admin_token,
         name="dup",
-        effect="allow",
-        resource="document",
-        action="read",
+        effect="ALLOW",
+        resource_types=["document"],
+        actions=["read"],
     )
     response = await client_ctx.post(
         "/api/v1/policies",
         json={
             "name": "dup",
-            "effect": "allow",
-            "resource": "document",
-            "action": "write",
+            "effect": "ALLOW",
+            "resource_types": ["document"],
+            "actions": ["write"],
         },
         headers=_auth(admin_token),
     )

@@ -123,9 +123,9 @@ fi
 
 # Custom org-scoped role — "moderator" isn't one of the four roles every
 # org is auto-provisioned with (owner/admin/member/viewer, see
-# app.services.role_lookup.DEFAULT_ORG_ROLES), so dummy.json's
+# app.modules.roles.service.DEFAULT_ORG_ROLES), so dummy.json's
 # moderator-tier users need it created before they can be added as members.
-request POST "/roles" "$SU_TOKEN" "{\"name\":\"Moderator\",\"code\":\"moderator\",\"organization_id\":\"${APPLE_ORG_ID}\"}" "201" "create the org-scoped 'moderator' role"
+request POST "/roles" "$SU_TOKEN" "{\"name\":\"Moderator\",\"slug\":\"moderator\",\"tenant_id\":\"${APPLE_TENANT_ID}\"}" "201" "create the org-scoped 'moderator' role"
 
 # ---------------------------------------------------------------------------
 section "Tenant Group — Apple Holdings (Organization<->Tenant many-to-many demo)"

@@ -122,6 +122,62 @@ class TestLoginRegression:
         assert "httponly" in set_cookie.lower()
         assert "secure" in set_cookie.lower()
 
+    @pytest.mark.anyio
+    async def test_login_accepts_optional_client_and_context(self, https_client, unique_email):
+        """Only email/password are required — client/context (and every
+        field within them) are optional, accepted-but-not-yet-acted-on
+        metadata (see LoginClientMetadata/LoginContextMetadata)."""
+        await _register(https_client, unique_email)
+        response = await https_client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": unique_email,
+                "password": "StrongPass1!",
+                "client": {
+                    "device_id": "dev123",
+                    "device_name": "MacBook Pro",
+                    "platform": "macOS",
+                    "browser": "Chrome",
+                },
+                "context": {
+                    "ip_address": "203.0.113.10",
+                    "timezone": "Asia/Dhaka",
+                    "locale": "en-US",
+                },
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["access_token"]
+
+    @pytest.mark.anyio
+    async def test_login_client_device_name_overrides_user_agent_in_session(self, https_client, unique_email):
+        await _register(https_client, unique_email)
+        response = await https_client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": unique_email,
+                "password": "StrongPass1!",
+                "client": {"device_name": "MacBook Pro"},
+            },
+            headers={"User-Agent": "curl/8.0"},
+        )
+        assert response.status_code == 200
+        assert response.json()["session"]["device"] == "MacBook Pro"
+
+    @pytest.mark.anyio
+    async def test_login_partial_client_metadata_is_allowed(self, https_client, unique_email):
+        """Every field within `client`/`context` is independently optional too."""
+        await _register(https_client, unique_email)
+        response = await https_client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": unique_email,
+                "password": "StrongPass1!",
+                "client": {"device_id": "dev123"},
+            },
+        )
+        assert response.status_code == 200
+
 
 # ===========================================================================
 # GET /users/me — protected profile endpoint

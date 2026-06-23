@@ -29,9 +29,8 @@ import pytest
 import respx
 from app.api.v1.dependencies import get_token_cache
 from app.core.config import get_settings
-from app.infrastructure.db.models.user import User
-from app.infrastructure.security.google_oidc import JWKS_URI, TOKEN_ENDPOINT
-from app.infrastructure.security.token_cache import InMemoryTokenCache
+from app.modules.auth.utils.oauth import JWKS_URI, TOKEN_ENDPOINT, InMemoryTokenCache
+from app.modules.users.models import User
 from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient
 from jwt.algorithms import RSAAlgorithm

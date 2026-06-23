@@ -9,7 +9,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 import pytest
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
@@ -131,9 +131,7 @@ class TestRevokeUserSession:
         token = await _login_token(client, (await _register(client, "alice-sess6@test.com"))["email"])
         user_id = (await client.get("/api/v1/users/me", headers=_auth(token))).json()["id"]
 
-        resp = await client.delete(
-            f"/api/v1/users/{user_id}/sessions/sess_{uuid4()}", headers=_auth(token)
-        )
+        resp = await client.delete(f"/api/v1/users/{user_id}/sessions/sess_{uuid4()}", headers=_auth(token))
         assert resp.status_code == 404
 
     async def test_cannot_revoke_another_users_session(self, client):

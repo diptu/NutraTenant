@@ -1,0 +1,60 @@
+"""Framework-free value objects shared by more than one module — no
+SQLAlchemy/FastAPI/pydantic imports here. A value object (or Literal type
+alias) used by exactly one module belongs in that module's own
+value_objects.py instead (e.g. PermissionRiskLevel lives in
+app.modules.permissions.value_objects, GroupStatus in
+app.modules.groups.value_objects).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from typing import Any
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_MAX_ATTRIBUTE_BYTES = 8 * 1024  # keeps the JSONB column small and the JWT it can feed cheap
+
+
+@dataclass(frozen=True, slots=True)
+class Email:
+    """A validated, normalized (lowercased + stripped) email address."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        normalized = self.value.strip().lower()
+        if not _EMAIL_RE.match(normalized):
+            raise ValueError(f"'{self.value}' is not a valid email address")
+        object.__setattr__(self, "value", normalized)
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectAttributes:
+    """The dynamic ABAC attribute bag stored on ``users.attributes`` (JSONB).
+
+    Deliberately a flat ``dict[str, Any]`` rather than a fixed schema — each
+    tenant may define its own attribute keys (``department``, ``clearance``,
+    ``region``, ``cost_center``, ...). Validation here is limited to keeping
+    the bag small and JSON-safe; per-tenant key/value schema enforcement is
+    out of scope for this value object.
+    """
+
+    values: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        for key in self.values:
+            if not isinstance(key, str) or not key:
+                raise ValueError("attribute keys must be non-empty strings")
+        if len(json.dumps(self.values)) > _MAX_ATTRIBUTE_BYTES:
+            raise ValueError(f"attribute bag exceeds {_MAX_ATTRIBUTE_BYTES} bytes")
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.values.get(key, default)
+
+    def merged_with(self, patch: dict[str, Any]) -> SubjectAttributes:
+        return SubjectAttributes({**self.values, **patch})

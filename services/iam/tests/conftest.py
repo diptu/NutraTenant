@@ -1,5 +1,4 @@
 import pytest
-from app.api.v1.dependencies import get_async_db, reset_oidc_client
 from app.core.cache import (
     InMemoryPermissionCache,
     get_permission_cache,
@@ -15,11 +14,12 @@ from app.core.token_blacklist import (
     get_token_blacklist,
     reset_token_blacklist,
 )
-from app.infrastructure.db import (
+from app.infrastructure.database import (
     models as _models,  # noqa: F401 - registers every model on Base.metadata
 )
-from app.infrastructure.db.base import Base
+from app.infrastructure.database.base import Base
 from app.main import app as app_instance
+from app.modules.auth.dependencies import get_async_db, reset_oidc_client
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool

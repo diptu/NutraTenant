@@ -12,11 +12,11 @@ import sys
 import uuid
 from datetime import UTC, datetime
 
-from app.domain.value_objects import Email
-from app.infrastructure.db.models.user import User
-from app.infrastructure.db.repositories.user_repo import UserRepository
-from app.infrastructure.db.session import async_session_factory, engine
-from app.infrastructure.security.password import hash_password
+from app.infrastructure.database.session import async_session_factory, engine
+from app.modules.auth.utils.passwords import hash_password
+from app.modules.users.models import User
+from app.modules.users.repositories.sqlalchemy.user_repository import UserRepository
+from app.shared.value_objects import Email
 
 
 async def main(email: str, password: str, full_name: str | None) -> None:

@@ -1,4 +1,4 @@
-"""Resolved-permission cache-aside store, used by app.services.org_permissions.
+"""Resolved-permission cache-aside store, used by app.modules.organizations.org_permissions.
 
 Module-level singleton (`get_permission_cache()`/`reset_permission_cache()`),
 same shape as app.core.rate_limit / app.core.token_blacklist.

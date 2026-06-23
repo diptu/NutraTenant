@@ -33,11 +33,11 @@ from app.core.cache import (
 from app.core.config import get_settings
 from app.core.jwt_context_middleware import JWTContextMiddleware, require_permission
 from app.core.rbac import PLATFORM_PERMISSIONS
-from app.infrastructure.db.models.associations import UserOrganizationRole
-from app.infrastructure.db.models.role import Role
-from app.infrastructure.db.models.user import User
-from app.services.org_permissions import get_member_permissions
-from app.services.rbac_seed import seed_rbac_catalog
+from app.core.rbac_seed import seed_rbac_catalog
+from app.infrastructure.database.associations import UserOrganizationRole
+from app.modules.organizations.org_permissions import get_member_permissions
+from app.modules.roles.models import Role
+from app.modules.users.models import User
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -249,7 +249,7 @@ class TestPermissionBasedAuthorization:
 class TestPermissionCatalogSeeding:
     @pytest.mark.anyio
     async def test_seeding_is_idempotent(self, db_session) -> None:
-        from app.infrastructure.db.models.permission import Permission
+        from app.modules.permissions.models import Permission
 
         await seed_rbac_catalog(db_session)
         before = (await db_session.execute(select(Permission))).scalars().all()
@@ -259,7 +259,7 @@ class TestPermissionCatalogSeeding:
 
     @pytest.mark.anyio
     async def test_admin_role_holds_full_platform_catalog(self, db_session) -> None:
-        from app.infrastructure.db.models.associations import RolePermission
+        from app.infrastructure.database.associations import RolePermission
         from sqlalchemy.orm import selectinload
 
         await seed_rbac_catalog(db_session)
@@ -274,7 +274,7 @@ class TestPermissionCatalogSeeding:
     @pytest.mark.anyio
     async def test_guest_role_holds_no_platform_permissions(self, db_session) -> None:
         await seed_rbac_catalog(db_session)
-        from app.infrastructure.db.models.associations import RolePermission
+        from app.infrastructure.database.associations import RolePermission
         from sqlalchemy.orm import selectinload
 
         result = await db_session.execute(
@@ -302,19 +302,22 @@ class TestRolePermissionAssignment:
         await seed_rbac_catalog(db_session)
         resp = await client.post(
             "/api/v1/roles",
-            json={"name": "Billing", "code": "billing_global"},
+            json={"name": "Billing", "slug": "billing_global"},
             headers=_auth(owner_token),
         )
         assert resp.status_code == 201, resp.text
-        role = resp.json()
+        role = resp.json()["role"]
 
         resp = await client.post(
             f"/api/v1/roles/{role['id']}/permissions",
-            json={"permission_codes": ["users:read"]},
+            json={"permissions": ["users:read"]},
             headers=_auth(owner_token),
         )
         assert resp.status_code == 200, resp.text
-        assert "users:read" in {p["code"] for p in resp.json()["permissions"]}
+        assert resp.json()["permissions_count"] == 1
+
+        listed = await client.get(f"/api/v1/roles/{role['id']}/permissions", headers=_auth(owner_token))
+        assert "users:read" in {p["name"] for p in listed.json()["permissions"]}
 
     @pytest.mark.anyio
     async def test_non_superuser_cannot_assign_permission_to_global_role(
@@ -324,16 +327,16 @@ class TestRolePermissionAssignment:
         await seed_rbac_catalog(db_session)
         resp = await client.post(
             "/api/v1/roles",
-            json={"name": "Billing2", "code": "billing_global_2"},
+            json={"name": "Billing2", "slug": "billing_global_2"},
             headers=_auth(owner_token),
         )
-        role = resp.json()
+        role = resp.json()["role"]
 
         await _register(client, "plain@test.com")
         plain_token = await _login_token(client, "plain@test.com")
         resp = await client.post(
             f"/api/v1/roles/{role['id']}/permissions",
-            json={"permission_codes": ["users:read"]},
+            json={"permissions": ["users:read"]},
             headers=_auth(plain_token),
         )
         assert resp.status_code == 403
@@ -345,14 +348,14 @@ class TestRolePermissionAssignment:
         await _make_superuser(db_session, owner["id"])
         resp = await client.post(
             "/api/v1/roles",
-            json={"name": "Billing3", "code": "billing_global_3"},
+            json={"name": "Billing3", "slug": "billing_global_3"},
             headers=_auth(owner_token),
         )
-        role = resp.json()
+        role = resp.json()["role"]
 
         resp = await client.post(
             f"/api/v1/roles/{role['id']}/permissions",
-            json={"permission_codes": ["does-not-exist:anything"]},
+            json={"permissions": ["does-not-exist:anything"]},
             headers=_auth(owner_token),
         )
         assert resp.status_code == 404
@@ -363,23 +366,26 @@ class TestRolePermissionAssignment:
         await seed_rbac_catalog(db_session)
         resp = await client.post(
             "/api/v1/roles",
-            json={"name": "Billing4", "code": "billing_global_4"},
+            json={"name": "Billing4", "slug": "billing_global_4"},
             headers=_auth(owner_token),
         )
-        role = resp.json()
-        resp = await client.post(
+        role = resp.json()["role"]
+        await client.post(
             f"/api/v1/roles/{role['id']}/permissions",
-            json={"permission_codes": ["users:read", "users:create"]},
+            json={"permissions": ["users:read", "users:create"]},
             headers=_auth(owner_token),
         )
-        target = next(p for p in resp.json()["permissions"] if p["code"] == "users:read")
 
-        resp = await client.delete(
-            f"/api/v1/roles/{role['id']}/permissions/{target['id']}",
+        resp = await client.request(
+            "DELETE",
+            f"/api/v1/roles/{role['id']}/permissions",
+            json={"permissions": ["users:read"]},
             headers=_auth(owner_token),
         )
         assert resp.status_code == 200, resp.text
-        remaining = {p["code"] for p in resp.json()["permissions"]}
+
+        listed = await client.get(f"/api/v1/roles/{role['id']}/permissions", headers=_auth(owner_token))
+        remaining = {p["name"] for p in listed.json()["permissions"]}
         assert "users:read" not in remaining
         assert "users:create" in remaining
 
@@ -389,7 +395,7 @@ class TestRolePermissionAssignment:
     ) -> None:
         """The org's auto-provisioned "owner" role is a system role
         (is_system=True) — its permissions can't be edited, even by the owner."""
-        from app.infrastructure.db.repositories.role_repo import RoleRepository
+        from app.modules.roles.repositories.sqlalchemy.role_repository import RoleRepository
 
         await seed_rbac_catalog(db_session)
         owner_role = await RoleRepository(db_session).get_by_code_in_org(
@@ -399,7 +405,7 @@ class TestRolePermissionAssignment:
 
         resp = await client.post(
             f"/api/v1/roles/{owner_role.id}/permissions",
-            json={"permission_codes": ["users:read"]},
+            json={"permissions": ["users:read"]},
             headers=_auth(owner_token),
         )
         assert resp.status_code == 403
@@ -413,17 +419,17 @@ class TestRolePermissionAssignment:
             "/api/v1/roles",
             json={
                 "name": "Custom",
-                "code": "custom_role",
-                "organization_id": organization["id"],
+                "slug": "custom_role",
+                "tenant_id": organization["slug"],
             },
             headers=_auth(owner_token),
         )
         assert resp.status_code == 201, resp.text
-        role = resp.json()
+        role = resp.json()["role"]
 
         resp = await client.post(
             f"/api/v1/roles/{role['id']}/permissions",
-            json={"permission_codes": ["organizations:read"]},
+            json={"permissions": ["organizations:read"]},
             headers=_auth(owner_token),
         )
         assert resp.status_code == 200, resp.text
@@ -437,12 +443,12 @@ class TestRolePermissionAssignment:
             "/api/v1/roles",
             json={
                 "name": "Custom2",
-                "code": "custom_role_2",
-                "organization_id": organization["id"],
+                "slug": "custom_role_2",
+                "tenant_id": organization["slug"],
             },
             headers=_auth(owner_token),
         )
-        role = resp.json()
+        role = resp.json()["role"]
 
         await client.post(
             f"/api/v1/organizations/{organization['id']}/members",
@@ -451,7 +457,7 @@ class TestRolePermissionAssignment:
         )
         resp = await client.post(
             f"/api/v1/roles/{role['id']}/permissions",
-            json={"permission_codes": ["organizations:read"]},
+            json={"permissions": ["organizations:read"]},
             headers=_auth(member_token),
         )
         assert resp.status_code == 403
@@ -465,18 +471,18 @@ class TestRolePermissionAssignment:
             "/api/v1/roles",
             json={
                 "name": "Custom3",
-                "code": "custom_role_3",
-                "organization_id": organization["id"],
+                "slug": "custom_role_3",
+                "tenant_id": organization["slug"],
             },
             headers=_auth(owner_token),
         )
-        role = resp.json()
+        role = resp.json()["role"]
 
         await _register(client, "outsider2@test.com")
         outsider_token = await _login_token(client, "outsider2@test.com")
         resp = await client.post(
             f"/api/v1/roles/{role['id']}/permissions",
-            json={"permission_codes": ["organizations:read"]},
+            json={"permissions": ["organizations:read"]},
             headers=_auth(outsider_token),
         )
         assert resp.status_code == 403

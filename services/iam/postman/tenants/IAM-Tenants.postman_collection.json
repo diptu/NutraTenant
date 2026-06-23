@@ -1,0 +1,537 @@
+{
+  "info": {
+    "name": "IAM Service — Tenant Provisioning API",
+    "_postman_id": "d4b2e8a1-6f3c-4e9a-8b1d-iam-tenants-0001",
+    "description": "Exercises the Tenant IAM Specification's bootstrap flow — POST /api/v1/tenants (Create Tenant) and POST /api/v1/tenants/{tenant_id}/invites (Invite User) — chained into the rest of the Authentication Flow diagram (Invite → Register/Accept → Login → Access Protected Resources). Sibling to ../auth and ../users — kept separate since this spec's main subject (tenant bootstrap) is otherwise untested by either: ../auth's Setup folder provisions test organizations via POST /organizations instead, a different, narrower contract for the same underlying OrganizationService.\n\n**Good news vs. the other two specs**: Create Tenant's `bootstrap.invite_token` and Invite User's `invite_token` are both *always* revealed in the response (`always_reveal_token=True` / no debug gate) — unlike forgot-password's `reset_token` or register's `verification_token` (../auth), this collection runs fully end-to-end with no `DEBUG=true` requirement.\n\n**Known gaps/deviations vs. the spec doc:**\n- Create Tenant's response matches the spec almost exactly (tenant/owner/default_roles/bootstrap), but `default_roles` reflects this codebase's actual default org roles (owner/admin/member/viewer → TENANT_ADMIN/ADMIN/MEMBER/VIEWER display mapping) rather than being a fixed literal list.\n- That `TENANT_ADMIN`/`ADMIN`/`MEMBER`/`VIEWER` display-name mapping is local to the `/tenants` routes (app/api/v1/routes/tenants.py) — `POST /auth/accept-invite`'s own `role` field is NOT run through it, so accepting the owner's bootstrap invite returns `role: \"Owner\"` (the stored Role.name, title-case), not `\"TENANT_ADMIN\"`. Likewise accepting a `role: \"MEMBER\"` invite returns `role: \"Member\"`. This collection asserts the real values.\n- `POST /auth/login`'s `user.role` is a `{id, name}` object (e.g. `{\"name\": \"Owner\"}`), not the spec's bare string.\n\n**Prerequisites:**\n1. Run the service: `uv run uvicorn app.main:app --reload --port 8000`.\n2. Create a superuser: `uv run python scripts/create_superuser.py admin@example.com ChangeMe123!` (update `superuser_email`/`superuser_password` below if different) — POST /tenants is superuser-only.\n\n**Auto token handling:** same pattern as ../auth and ../users — Login Test scripts capture tokens per actor (superuser/owner/invited_member) into collection variables, and a collection-level pre-request script auto-refreshes a near-expired token via POST /auth/refresh before any other request runs.\n\n**Run order matters** — folders build on each other: Create Tenant produces the owner's bootstrap invite; the owner accepts it and logs in; the owner then invites a member; the member accepts and logs in; both profiles are read back to close the spec's flow diagram loop.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Collection-level: auto-detect a near-expired/missing access token for",
+          "// the current actor(s) and silently refresh it via POST /auth/refresh",
+          "// before the request runs.",
+          "function base64UrlDecode(input) {",
+          "    input = input.replace(/-/g, '+').replace(/_/g, '/');",
+          "    while (input.length % 4) { input += '='; }",
+          "    return decodeURIComponent(",
+          "        atob(input).split('').map(function (c) {",
+          "            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);",
+          "        }).join('')",
+          "    );",
+          "}",
+          "",
+          "function isExpiredOrMissing(token) {",
+          "    if (!token) return true;",
+          "    var parts = token.split('.');",
+          "    if (parts.length !== 3) return true;",
+          "    try {",
+          "        var payload = JSON.parse(base64UrlDecode(parts[1]));",
+          "        return !payload.exp || (payload.exp * 1000) < (Date.now() + 5000);",
+          "    } catch (e) {",
+          "        return true;",
+          "    }",
+          "}",
+          "",
+          "function refreshActor(actor, cb) {",
+          "    var accessVar = actor + '_access_token';",
+          "    var refreshVar = actor + '_refresh_token';",
+          "    var accessToken = pm.collectionVariables.get(accessVar);",
+          "    var refreshToken = pm.collectionVariables.get(refreshVar);",
+          "",
+          "    if (!refreshToken || !isExpiredOrMissing(accessToken)) {",
+          "        return cb();",
+          "    }",
+          "",
+          "    pm.sendRequest({",
+          "        url: pm.collectionVariables.get('base_url') + '/api/v1/auth/refresh',",
+          "        method: 'POST',",
+          "        header: { 'Content-Type': 'application/json' },",
+          "        body: { mode: 'raw', raw: JSON.stringify({ refresh_token: refreshToken }) }",
+          "    }, function (err, res) {",
+          "        if (!err && res && res.code === 200) {",
+          "            var json = res.json();",
+          "            pm.collectionVariables.set(accessVar, json.access_token);",
+          "            pm.collectionVariables.set(refreshVar, json.refresh_token);",
+          "            console.log('[auto-refresh] ' + actor + ' access token refreshed');",
+          "        } else {",
+          "            console.log('[auto-refresh] ' + actor + ' refresh skipped/failed (continuing with existing token)');",
+          "        }",
+          "        cb();",
+          "    });",
+          "}",
+          "",
+          "// Requests whose own Test script defines/rotates a token manage it",
+          "// directly — skip auto-refresh for those so we don't step on them.",
+          "var requestName = pm.info.requestName || '';",
+          "if (!/^(Login|Refresh|Create Tenant|Accept)/i.test(requestName)) {",
+          "    refreshActor('superuser', function () {",
+          "        refreshActor('owner', function () {",
+          "            refreshActor('invited_member', function () {});",
+          "        });",
+          "    });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "superuser_email", "value": "admin@example.com" },
+    { "key": "superuser_password", "value": "ChangeMe123!" },
+    { "key": "superuser_access_token", "value": "" },
+    { "key": "superuser_refresh_token", "value": "" },
+    { "key": "superuser_user_id", "value": "" },
+    { "key": "tenant_name", "value": "" },
+    { "key": "tenant_id", "value": "" },
+    { "key": "organization_id", "value": "" },
+    { "key": "owner_email", "value": "" },
+    { "key": "owner_password", "value": "" },
+    { "key": "owner_user_id", "value": "" },
+    { "key": "owner_access_token", "value": "" },
+    { "key": "owner_refresh_token", "value": "" },
+    { "key": "bootstrap_invite_token", "value": "" },
+    { "key": "invite_email", "value": "" },
+    { "key": "invite_token", "value": "" },
+    { "key": "invited_member_password", "value": "" },
+    { "key": "invited_member_user_id", "value": "" },
+    { "key": "invited_member_access_token", "value": "" },
+    { "key": "invited_member_refresh_token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Create Tenant",
+      "item": [
+        {
+          "name": "Login Superuser",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Superuser login succeeded', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('superuser_access_token', body.access_token);",
+                  "pm.collectionVariables.set('superuser_refresh_token', body.refresh_token);",
+                  "if (body.user && body.user.id) {",
+                  "    pm.collectionVariables.set('superuser_user_id', body.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{superuser_email}}\",\n  \"password\": \"{{superuser_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Requires the account named by superuser_email/superuser_password to already exist with is_superuser=true — see the collection description for scripts/create_superuser.py."
+          }
+        },
+        {
+          "name": "Create Tenant",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('tenant_name', 'Apple Corp');",
+                  "pm.collectionVariables.set('tenant_id', 'apple-corp-' + ts);",
+                  "pm.collectionVariables.set('owner_email', 'owner.' + ts + '@apple-corp.example.com');",
+                  "pm.collectionVariables.set('owner_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created, full bootstrap contract', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    pm.expect(body.tenant.tenant_id).to.equal(pm.collectionVariables.get('tenant_id'));",
+                  "    pm.expect(body.tenant.status).to.equal('ACTIVE');",
+                  "    pm.expect(body.tenant.plan).to.equal('enterprise');",
+                  "    pm.expect(body.owner.email).to.equal(pm.collectionVariables.get('owner_email'));",
+                  "    pm.expect(body.owner.status).to.equal('PENDING_VERIFICATION');",
+                  "    pm.expect(body.default_roles).to.include.members(['TENANT_ADMIN', 'ADMIN', 'MEMBER', 'VIEWER']);",
+                  "    pm.expect(body.bootstrap.invite_token).to.be.a('string');",
+                  "    pm.expect(body.bootstrap.invite_expiry).to.equal(86400);",
+                  "});",
+                  "pm.collectionVariables.set('organization_id', body.tenant.id);",
+                  "pm.collectionVariables.set('bootstrap_invite_token', body.bootstrap.invite_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{tenant_name}}\",\n  \"tenant_id\": \"{{tenant_id}}\",\n  \"owner_email\": \"{{owner_email}}\",\n  \"plan\": \"enterprise\",\n  \"settings\": {\n    \"allow_self_signup\": false,\n    \"mfa_required\": true,\n    \"session_timeout_minutes\": 60,\n    \"password_policy\": {\n      \"min_length\": 8,\n      \"require_uppercase\": true,\n      \"require_number\": true,\n      \"require_symbol\": true\n    }\n  },\n  \"metadata\": {\n    \"industry\": \"Technology\",\n    \"region\": \"APAC\",\n    \"timezone\": \"Asia/Dhaka\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/tenants",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "tenants"]
+            },
+            "description": "Superuser-only. Since owner_email has no existing account, the response includes bootstrap.invite_token (always revealed — no DEBUG gate) for the owner to complete their account via POST /auth/accept-invite below."
+          }
+        },
+        {
+          "name": "Create Tenant — Duplicate tenant_id (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict — tenant_id already exists', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{tenant_name}}\",\n  \"tenant_id\": \"{{tenant_id}}\",\n  \"owner_email\": \"someone-else@apple-corp.example.com\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/tenants",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "tenants"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Owner Onboarding",
+      "item": [
+        {
+          "name": "Accept Tenant Owner Invite",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created, ACTIVE owner membership', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    pm.expect(body.tenant_id).to.equal(pm.collectionVariables.get('tenant_id'));",
+                  "    pm.expect(body.status).to.equal('ACTIVE');",
+                  "    pm.expect(body.role).to.equal('Owner');",
+                  "});",
+                  "pm.collectionVariables.set('owner_user_id', body.user_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"invite_token\": \"{{bootstrap_invite_token}}\",\n  \"name\": \"Apple Corp Admin\",\n  \"password\": \"{{owner_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/accept-invite",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "accept-invite"]
+            },
+            "description": "role here is the stored Role.name ('Owner') — the TENANT_ADMIN display mapping from Create Tenant's response is local to the /tenants routes and doesn't apply to accept-invite."
+          }
+        },
+        {
+          "name": "Login Tenant Owner",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, bound to the new tenant as Owner', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    // tenant_id/role aren't duplicated in body.user — they're already",
+                  "    // the access token's own tenant_id/role claims.",
+                  "    var claims = JSON.parse(atob(body.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                  "    pm.expect(claims.tenant_id).to.equal(pm.collectionVariables.get('tenant_id'));",
+                  "    pm.expect(claims.role).to.equal('Owner');",
+                  "});",
+                  "pm.collectionVariables.set('owner_access_token', body.access_token);",
+                  "pm.collectionVariables.set('owner_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"{{owner_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "No tenant_id needed — the owner belongs to exactly one organization, so it auto-resolves."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Invite & Onboard A Member",
+      "item": [
+        {
+          "name": "Invite New Member To Tenant",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('invite_email', 'member.' + Date.now() + '@apple-corp.example.com');",
+                  "pm.collectionVariables.set('invited_member_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created, matches the spec contract exactly', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    pm.expect(body.tenant_id).to.equal(pm.collectionVariables.get('tenant_id'));",
+                  "    pm.expect(body.invite_token).to.be.a('string');",
+                  "    pm.expect(body.expires_in).to.equal(86400);",
+                  "});",
+                  "pm.collectionVariables.set('invite_token', body.invite_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{owner_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{invite_email}}\",\n  \"role\": \"MEMBER\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/tenants/{{tenant_id}}/invites",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "tenants", "{{tenant_id}}", "invites"]
+            },
+            "description": "invite_token is always revealed in the response (always_reveal_token=True at the call site) — unlike the org-generic POST /organizations/{id}/invitations contract, which is debug-gated. Owner role bypasses the 'tenant:invite' permission check."
+          }
+        },
+        {
+          "name": "Accept Member Invite",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created, ACTIVE member', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    pm.expect(body.tenant_id).to.equal(pm.collectionVariables.get('tenant_id'));",
+                  "    pm.expect(body.role).to.equal('Member');",
+                  "    pm.expect(body.status).to.equal('ACTIVE');",
+                  "});",
+                  "pm.collectionVariables.set('invited_member_user_id', body.user_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"invite_token\": \"{{invite_token}}\",\n  \"name\": \"New Member\",\n  \"password\": \"{{invited_member_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/accept-invite",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "accept-invite"]
+            },
+            "description": "Matches the spec's section 7 response shape exactly: {user_id, tenant_id, role, status}."
+          }
+        },
+        {
+          "name": "Login Invited Member",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, bound to the tenant as Member', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    // tenant_id/role aren't duplicated in body.user — they're already",
+                  "    // the access token's own tenant_id/role claims.",
+                  "    var claims = JSON.parse(atob(body.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                  "    pm.expect(claims.tenant_id).to.equal(pm.collectionVariables.get('tenant_id'));",
+                  "    pm.expect(claims.role).to.equal('Member');",
+                  "});",
+                  "pm.collectionVariables.set('invited_member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('invited_member_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{invite_email}}\",\n  \"password\": \"{{invited_member_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Access Protected Resources",
+      "description": "Closes the spec's Authentication Flow diagram loop — both the owner and the invited member can now read their own tenant-scoped profile.",
+      "item": [
+        {
+          "name": "Get Owner Profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, Owner role + tenant context resolved', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.role.name).to.equal('Owner');",
+                  "    pm.expect(body.tenant.tenant_id).to.equal(pm.collectionVariables.get('tenant_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{owner_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/me",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "me"]
+            }
+          }
+        },
+        {
+          "name": "Get Member Profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, Member role + tenant context resolved', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.role.name).to.equal('Member');",
+                  "    pm.expect(body.tenant.tenant_id).to.equal(pm.collectionVariables.get('tenant_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{invited_member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/me",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "me"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Cleanup",
+      "item": [
+        {
+          "name": "Delete Tenant Organization (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('204 No Content', function () { pm.response.to.have.status(204); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_id}}"]
+            },
+            "description": "There is no DELETE /tenants/{tenant_id} — tenants created via POST /tenants are still just Organization rows underneath, so cleanup goes through DELETE /organizations/{organization_id}."
+          }
+        }
+      ]
+    }
+  ]
+}

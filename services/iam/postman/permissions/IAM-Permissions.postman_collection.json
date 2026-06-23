@@ -1,0 +1,987 @@
+{
+  "info": {
+    "name": "IAM Service — Permission Management API",
+    "_postman_id": "e5c3a7f2-9b4d-4f1a-8c2e-iam-permissions-0001",
+    "description": "Exercises every /api/v1/permissions endpoint in app/api/v1/routes/permissions.py, implemented from Permission_API_Specification_Extended.md. Sibling to ../auth, ../users, ../tenants, and ../roles — kept separate so each can be run/maintained independently.\n\n**Notes on the implementation vs. the spec doc:**\n- All mutating endpoints (create/update/delete/bulk/seed/assign/remove/enable/disable) are superuser-gated — the spec's \"Critical permissions require ADMIN role\" / \"Permission assignments require ADMIN privileges\" map onto the one privileged role this codebase has at the platform level. Read endpoints (list/get/search/roles/usage/audit) are open to any authenticated user.\n- `resource`/`action` must match `^[a-z0-9_]+$` (no hyphens) — they compose the permission's `name`/code as `{resource}:{action}`.\n- Create's response enriches the spec's narrower example (id/name/resource/action/description) with the full Common Permission Object (category/risk_level/tenant_id/is_system/status/timestamps) — a superset, so existing consumers reading only the documented fields are unaffected.\n- `tenant_id` is null for a permission created by a superuser with no active tenant context (a global/platform permission) — set to the caller's current organization slug otherwise, same convention as ../roles and ../tenants.\n- `policies_count` in Get Permission Usage is an approximation: Policy has no FK to Permission, so it's an exact-match count of policies whose own `resource`/`action` strings match this permission's.\n\n**Prerequisites:**\n1. Run the service: `uv run uvicorn app.main:app --reload --port 8000`.\n2. Create a superuser: `uv run python scripts/create_superuser.py admin@example.com ChangeMe123!` (update `superuser_email`/`superuser_password` below if different).\n\n**Auto token handling:** same pattern as the sibling collections — Login Test scripts capture tokens per actor into collection variables, and a collection-level pre-request script auto-refreshes a near-expired token via POST /auth/refresh before any other request runs.\n\n**Run order matters** — later folders assume earlier ones ran (Setup seeds a global role; Role Assignment needs both a permission and that role to exist).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Collection-level: auto-detect a near-expired/missing access token for",
+          "// the current actor(s) and silently refresh it via POST /auth/refresh",
+          "// before the request runs.",
+          "function base64UrlDecode(input) {",
+          "    input = input.replace(/-/g, '+').replace(/_/g, '/');",
+          "    while (input.length % 4) { input += '='; }",
+          "    return decodeURIComponent(",
+          "        atob(input).split('').map(function (c) {",
+          "            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);",
+          "        }).join('')",
+          "    );",
+          "}",
+          "",
+          "function isExpiredOrMissing(token) {",
+          "    if (!token) return true;",
+          "    var parts = token.split('.');",
+          "    if (parts.length !== 3) return true;",
+          "    try {",
+          "        var payload = JSON.parse(base64UrlDecode(parts[1]));",
+          "        return !payload.exp || (payload.exp * 1000) < (Date.now() + 5000);",
+          "    } catch (e) {",
+          "        return true;",
+          "    }",
+          "}",
+          "",
+          "function refreshActor(actor, cb) {",
+          "    var accessVar = actor + '_access_token';",
+          "    var refreshVar = actor + '_refresh_token';",
+          "    var accessToken = pm.collectionVariables.get(accessVar);",
+          "    var refreshToken = pm.collectionVariables.get(refreshVar);",
+          "",
+          "    if (!refreshToken || !isExpiredOrMissing(accessToken)) {",
+          "        return cb();",
+          "    }",
+          "",
+          "    pm.sendRequest({",
+          "        url: pm.collectionVariables.get('base_url') + '/api/v1/auth/refresh',",
+          "        method: 'POST',",
+          "        header: { 'Content-Type': 'application/json' },",
+          "        body: { mode: 'raw', raw: JSON.stringify({ refresh_token: refreshToken }) }",
+          "    }, function (err, res) {",
+          "        if (!err && res && res.code === 200) {",
+          "            var json = res.json();",
+          "            pm.collectionVariables.set(accessVar, json.access_token);",
+          "            pm.collectionVariables.set(refreshVar, json.refresh_token);",
+          "            console.log('[auto-refresh] ' + actor + ' access token refreshed');",
+          "        } else {",
+          "            console.log('[auto-refresh] ' + actor + ' refresh skipped/failed (continuing with existing token)');",
+          "        }",
+          "        cb();",
+          "    });",
+          "}",
+          "",
+          "var requestName = pm.info.requestName || '';",
+          "if (!/^(Login|Register|Refresh)/i.test(requestName)) {",
+          "    refreshActor('superuser', function () {",
+          "        refreshActor('member', function () {});",
+          "    });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "superuser_email", "value": "admin@example.com" },
+    { "key": "superuser_password", "value": "ChangeMe123!" },
+    { "key": "superuser_access_token", "value": "" },
+    { "key": "superuser_refresh_token", "value": "" },
+    { "key": "superuser_user_id", "value": "" },
+    { "key": "member_email", "value": "" },
+    { "key": "member_password", "value": "" },
+    { "key": "member_access_token", "value": "" },
+    { "key": "member_refresh_token", "value": "" },
+    { "key": "guest_role_id", "value": "" },
+    { "key": "permission_id", "value": "" },
+    { "key": "permission_resource", "value": "" },
+    { "key": "throwaway_permission_id", "value": "" },
+    { "key": "bulk_resource", "value": "" },
+    { "key": "seed_resource", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Setup",
+      "item": [
+        {
+          "name": "Login Superuser",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Superuser login succeeded', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('superuser_access_token', body.access_token);",
+                  "pm.collectionVariables.set('superuser_refresh_token', body.refresh_token);",
+                  "if (body.user && body.user.id) {",
+                  "    pm.collectionVariables.set('superuser_user_id', body.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{superuser_email}}\",\n  \"password\": \"{{superuser_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Requires the account named by superuser_email/superuser_password to already exist with is_superuser=true — see scripts/create_superuser.py."
+          }
+        },
+        {
+          "name": "Register Member User",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('member_email', 'member.' + ts + '@example.com');",
+                  "pm.collectionVariables.set('member_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Registered', function () { pm.expect(pm.response.code).to.equal(201); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\",\n  \"full_name\": \"Regular Member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            },
+            "description": "A plain (non-superuser) account, used only to demonstrate that mutating /permissions endpoints reject it with 403."
+          }
+        },
+        {
+          "name": "Login Member User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Member login succeeded', function () { pm.expect(pm.response.code).to.equal(200); });",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "Seed Global Roles (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Roles seeded', function () { pm.expect(pm.response.code).to.equal(200); });",
+                  "var roles = pm.response.json();",
+                  "var guest = roles.find(function (r) { return r.code === 'guest'; });",
+                  "pm.collectionVariables.set('guest_role_id', guest.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/seed",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "seed"]
+            },
+            "description": "Needed for '4. Role Assignment' below — assigning a permission to a role requires a role to exist."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Create & Read",
+      "item": [
+        {
+          "name": "Create Permission",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('permission_resource', 'invoice_' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created, full Common Permission Object', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "    pm.expect(body.message).to.equal('Permission created successfully');",
+                  "    var p = body.permission;",
+                  "    pm.expect(p.name).to.equal(pm.collectionVariables.get('permission_resource') + ':approve');",
+                  "    pm.expect(p.category).to.equal('Finance');",
+                  "    pm.expect(p.risk_level).to.equal('HIGH');",
+                  "    pm.expect(p.is_system).to.equal(false);",
+                  "    pm.expect(p.status).to.equal('ACTIVE');",
+                  "});",
+                  "pm.collectionVariables.set('permission_id', body.permission.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resource\": \"{{permission_resource}}\",\n  \"action\": \"approve\",\n  \"description\": \"Approve invoices\",\n  \"category\": \"Finance\",\n  \"risk_level\": \"HIGH\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions"]
+            }
+          }
+        },
+        {
+          "name": "Create Permission — Duplicate (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('409 Conflict', function () { pm.response.to.have.status(409); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resource\": \"{{permission_resource}}\",\n  \"action\": \"approve\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions"]
+            }
+          }
+        },
+        {
+          "name": "Create Permission — Forbidden For Non-Superuser",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('403 Forbidden', function () { pm.response.to.have.status(403); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{member_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resource\": \"shouldnotwork\",\n  \"action\": \"create\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions"]
+            }
+          }
+        },
+        {
+          "name": "List Permissions",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, pagination envelope', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body).to.have.property('total');",
+                  "    pm.expect(body.page).to.equal(1);",
+                  "    pm.expect(body.page_size).to.equal(20);",
+                  "    pm.expect(body.permissions).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions?page=1&page_size=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "page_size", "value": "20" }
+              ]
+            },
+            "description": "Read endpoints are open to any authenticated user, not just superusers."
+          }
+        },
+        {
+          "name": "List Permissions — Filter By Resource",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, only the matching resource', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.total).to.equal(1);",
+                  "    pm.expect(body.permissions[0].resource).to.equal(pm.collectionVariables.get('permission_resource'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions?resource={{permission_resource}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions"],
+              "query": [{ "key": "resource", "value": "{{permission_resource}}" }]
+            }
+          }
+        },
+        {
+          "name": "Search Permissions",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, results array', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.results).to.be.an('array');",
+                  "    pm.expect(body.results.some(function (r) { return r.resource === pm.collectionVariables.get('permission_resource'); })).to.equal(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/search?q={{permission_resource}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "search"],
+              "query": [{ "key": "q", "value": "{{permission_resource}}" }]
+            }
+          }
+        },
+        {
+          "name": "Get Permission By ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().permission.id).to.equal(pm.collectionVariables.get('permission_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Get Permission By ID — Unknown (expect 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('404 Not Found', function () { pm.response.to.have.status(404); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/00000000-0000-0000-0000-000000000000",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "00000000-0000-0000-0000-000000000000"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Update & Delete",
+      "item": [
+        {
+          "name": "Update Permission",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, fields updated', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.message).to.equal('Permission updated successfully');",
+                  "    pm.expect(body.permission.description).to.equal('Updated description');",
+                  "    pm.expect(body.permission.risk_level).to.equal('CRITICAL');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"description\": \"Updated description\",\n  \"risk_level\": \"CRITICAL\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Create Throwaway Permission",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', function () { pm.expect(pm.response.code).to.equal(201); });",
+                  "pm.collectionVariables.set('throwaway_permission_id', pm.response.json().permission.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resource\": \"throwaway_{{$timestamp}}\",\n  \"action\": \"delete_me\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions"]
+            }
+          }
+        },
+        {
+          "name": "Delete Permission",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ success: true, message: 'Permission deleted successfully' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{throwaway_permission_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{throwaway_permission_id}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Bulk & Seed",
+      "item": [
+        {
+          "name": "Bulk Create Permissions",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('bulk_resource', 'document_' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, both created', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ created: 2, failed: 0 });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"permissions\": [\n    { \"resource\": \"{{bulk_resource}}\", \"action\": \"create\" },\n    { \"resource\": \"{{bulk_resource}}\", \"action\": \"read\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/bulk",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "bulk"]
+            }
+          }
+        },
+        {
+          "name": "Bulk Create Permissions — One Duplicate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, the repeat counts as failed', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ created: 1, failed: 1 });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"permissions\": [\n    { \"resource\": \"{{bulk_resource}}\", \"action\": \"create\" },\n    { \"resource\": \"{{bulk_resource}}\", \"action\": \"update\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/bulk",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "bulk"]
+            },
+            "description": "{{bulk_resource}}:create already exists from the previous request — it's counted in `failed`, :update is genuinely new and counted in `created`."
+          }
+        },
+        {
+          "name": "Seed Resource Permissions",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('seed_resource', 'widget_' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "var r = pm.collectionVariables.get('seed_resource');",
+                  "pm.test('200 OK, 4 standard actions created', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body.created_permissions.sort()).to.eql([",
+                  "        r + ':create', r + ':delete', r + ':read', r + ':update'",
+                  "    ].sort());",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resources\": [\"{{seed_resource}}\"]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/seed",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "seed"]
+            },
+            "description": "Provisions {resource}:create/read/update/delete — matches the spec's own example exactly (resources:[\"user\"] -> user:create/read/update/delete)."
+          }
+        },
+        {
+          "name": "Seed Resource Permissions — Idempotent",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, nothing new created the second time', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().created_permissions).to.eql([]);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resources\": [\"{{seed_resource}}\"]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/seed",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "seed"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Role Assignment",
+      "item": [
+        {
+          "name": "Assign Permission To Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ success: true, message: 'Permission assigned successfully' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role_id\": \"{{guest_role_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}", "roles"]
+            }
+          }
+        },
+        {
+          "name": "Get Permission Roles",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, includes the assigned role', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var ids = body.roles.map(function (r) { return r.id; });",
+                  "    pm.expect(ids).to.include(pm.collectionVariables.get('guest_role_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}", "roles"]
+            }
+          }
+        },
+        {
+          "name": "Remove Permission From Role",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ success: true });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}/roles/{{guest_role_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}", "roles", "{{guest_role_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Get Permission Roles — Confirms Removal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, role no longer listed', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var ids = body.roles.map(function (r) { return r.id; });",
+                  "    pm.expect(ids).to.not.include(pm.collectionVariables.get('guest_role_id'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}", "roles"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Usage, Lifecycle & Audit",
+      "item": [
+        {
+          "name": "Get Permission Usage",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, usage counters present', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body).to.have.property('users_count');",
+                  "    pm.expect(body).to.have.property('roles_count');",
+                  "    pm.expect(body).to.have.property('policies_count');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}/usage",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}", "usage"]
+            }
+          }
+        },
+        {
+          "name": "Disable Permission",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, DISABLED', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ status: 'DISABLED' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}/disable",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}", "disable"]
+            }
+          }
+        },
+        {
+          "name": "Enable Permission",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, ACTIVE', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql({ status: 'ACTIVE' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}/enable",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}", "enable"]
+            }
+          }
+        },
+        {
+          "name": "Get Permission Audit History",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK, lifecycle events recorded', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var events = body.events.map(function (e) { return e.event; });",
+                  "    pm.expect(events).to.include('permission.created');",
+                  "    pm.expect(events).to.include('permission.updated');",
+                  "    pm.expect(events).to.include('permission.disabled');",
+                  "    pm.expect(events).to.include('permission.enabled');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/permissions/{{permission_id}}/audit",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "permissions", "{{permission_id}}", "audit"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

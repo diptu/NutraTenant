@@ -7,7 +7,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from sqlalchemy import select
 
 
@@ -113,13 +113,13 @@ class TestCreateInvite:
         the access token's own tenant_id claim must match the path."""
         owner_a_email = (await _register(client, "ownerA@test.com"))["email"]
         owner_a_token = await _login_token(client, owner_a_email)
-        await _create_org(client, db_session, owner_a_token, name="A", slug="tenant-a")
+        await _create_org(client, db_session, owner_a_token, name="AA", slug="tenant-a")
 
         owner_a_id = (await client.get("/api/v1/users/me", headers=_auth(owner_a_token))).json()["id"]
 
         owner_b_email = (await _register(client, "ownerB@test.com"))["email"]
         owner_b_token = await _login_token(client, owner_b_email)
-        org_b = await _create_org(client, db_session, owner_b_token, name="B", slug="tenant-b")
+        org_b = await _create_org(client, db_session, owner_b_token, name="BB", slug="tenant-b")
 
         # Make owner_a also a member of org_b, then log them in scoped to org_a.
         await client.post(
@@ -140,7 +140,7 @@ class TestCreateInvite:
     @pytest.mark.anyio
     async def test_member_without_permission_cannot_invite(self, client, db_session):
         owner_token = await _login_token(client, (await _register(client, "owner3@test.com"))["email"])
-        org = await _create_org(client, db_session, owner_token, name="C", slug="tenant-c")
+        org = await _create_org(client, db_session, owner_token, name="CC", slug="tenant-c")
 
         member_email = (await _register(client, "plainmember@test.com"))["email"]
         member_token = await _login_token(client, member_email)
@@ -168,7 +168,7 @@ class TestCreateInvite:
         super_token = await _login_token(client, super_email)  # re-login: refreshed claims
 
         owner_token = await _login_token(client, (await _register(client, "owner4@test.com"))["email"])
-        org = await _create_org(client, db_session, owner_token, name="D", slug="tenant-d")
+        org = await _create_org(client, db_session, owner_token, name="DD", slug="tenant-d")
 
         resp = await client.post(
             f"/api/v1/tenants/{org['slug']}/invites",
@@ -191,7 +191,7 @@ class TestCreateInvite:
     async def test_unknown_role_returns_404(self, client, db_session):
         owner_email = (await _register(client, "owner6@test.com"))["email"]
         owner_token = await _login_token(client, owner_email)
-        org = await _create_org(client, db_session, owner_token, name="E", slug="tenant-e")
+        org = await _create_org(client, db_session, owner_token, name="EE", slug="tenant-e")
         owner_token = await _login_token(client, owner_email)
         resp = await client.post(
             f"/api/v1/tenants/{org['slug']}/invites",
@@ -205,7 +205,7 @@ class TestAcceptInvite:
     @pytest.mark.anyio
     async def test_new_user_accepts_invite_and_can_log_in(self, client, db_session):
         owner_token, org = await _register_org_owner_scoped(
-            client, db_session, "owner7@test.com", name="F", slug="tenant-f"
+            client, db_session, "owner7@test.com", name="FF", slug="tenant-f"
         )
         invite = (
             await client.post(
@@ -230,12 +230,12 @@ class TestAcceptInvite:
         assert body["status"] == "ACTIVE"
 
         login_resp = await _login(client, "newperson@test.com", "StrongPass1!")
-        assert login_resp["user"]["tenant"]["tenant_id"] == "tenant-f"
+        assert login_resp["user"]["tenant"]["id"] == org["id"]
 
     @pytest.mark.anyio
     async def test_invite_token_is_single_use(self, client, db_session):
         owner_token, org = await _register_org_owner_scoped(
-            client, db_session, "owner8@test.com", name="G", slug="tenant-g"
+            client, db_session, "owner8@test.com", name="GG", slug="tenant-g"
         )
         invite = (
             await client.post(
@@ -276,7 +276,7 @@ class TestAcceptInvite:
         await _register(client, "alreadyexists@test.com", "OriginalPass1!")
 
         owner_token, org = await _register_org_owner_scoped(
-            client, db_session, "owner9@test.com", name="H", slug="tenant-h"
+            client, db_session, "owner9@test.com", name="HH", slug="tenant-h"
         )
         invite = (
             await client.post(

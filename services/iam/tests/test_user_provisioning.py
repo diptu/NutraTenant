@@ -9,7 +9,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
@@ -48,9 +48,7 @@ async def _superuser_token(client, db_session, email: str) -> str:
 
 
 async def _create_org(client, token: str, *, name: str, slug: str) -> dict:
-    resp = await client.post(
-        "/api/v1/organizations", json={"name": name, "slug": slug}, headers=_auth(token)
-    )
+    resp = await client.post("/api/v1/organizations", json={"name": name, "slug": slug}, headers=_auth(token))
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -129,7 +127,7 @@ class TestCreateUser:
 
     async def test_non_superuser_is_forbidden(self, client, db_session):
         super_token = await _superuser_token(client, db_session, "root-up7@test.com")
-        await _create_org(client, super_token, name="B", slug="tenant-b-up")
+        await _create_org(client, super_token, name="BB", slug="tenant-b-up")
         regular_token = await _login_token(client, (await _register(client, "regular-up@test.com"))["email"])
 
         resp = await client.post(
@@ -150,7 +148,7 @@ class TestCreateUser:
 
     async def test_unknown_role_returns_404(self, client, db_session):
         super_token = await _superuser_token(client, db_session, "root-up4@test.com")
-        await _create_org(client, super_token, name="C", slug="tenant-c-up")
+        await _create_org(client, super_token, name="CC", slug="tenant-c-up")
 
         resp = await client.post(
             "/api/v1/users",
@@ -161,7 +159,7 @@ class TestCreateUser:
 
     async def test_duplicate_email_returns_409(self, client, db_session):
         super_token = await _superuser_token(client, db_session, "root-up5@test.com")
-        await _create_org(client, super_token, name="D", slug="tenant-d-up")
+        await _create_org(client, super_token, name="DD", slug="tenant-d-up")
         await _register(client, "dup-up@test.com")
 
         resp = await client.post(
@@ -173,7 +171,7 @@ class TestCreateUser:
 
     async def test_duplicate_username_returns_409(self, client, db_session):
         super_token = await _superuser_token(client, db_session, "root-up6@test.com")
-        await _create_org(client, super_token, name="E", slug="tenant-e-up")
+        await _create_org(client, super_token, name="EE", slug="tenant-e-up")
 
         first = await client.post(
             "/api/v1/users",

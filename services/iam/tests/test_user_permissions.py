@@ -1,7 +1,7 @@
 """POST/DELETE /api/v1/users/{user_id}/permissions — direct, org-scoped
 permission grants independent of the user's role (see
 app.infrastructure.db.models.associations.UserPermissionGrant and
-app.services.user_service.UserService.add_permissions/remove_permissions).
+app.modules.users.service.UserService.add_permissions/remove_permissions).
 
 Additive only: these are stored and merged into the Common User Object's
 `permissions` list, but not (yet) read by the RBAC fast-path or
@@ -14,8 +14,8 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from app.infrastructure.db.models.permission import Permission
-from app.infrastructure.db.models.user import User
+from app.modules.permissions.models import Permission
+from app.modules.users.models import User
 from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
@@ -54,9 +54,7 @@ async def _superuser_token(client, db_session, email: str) -> str:
 
 
 async def _create_org(client, token: str, *, slug: str, name: str = "Acme Inc") -> dict:
-    resp = await client.post(
-        "/api/v1/organizations", json={"name": name, "slug": slug}, headers=_auth(token)
-    )
+    resp = await client.post("/api/v1/organizations", json={"name": name, "slug": slug}, headers=_auth(token))
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -202,9 +200,7 @@ class TestAddUserPermissions:
         assert profile_e.json()["permissions"] == ["document:create"]
 
     async def test_requires_superuser(self, client, db_session, permission_codes):
-        alice_token = await _login_token(
-            client, (await _register(client, "alice-perm@test.com"))["email"]
-        )
+        alice_token = await _login_token(client, (await _register(client, "alice-perm@test.com"))["email"])
         alice_id = (await client.get("/api/v1/users/me", headers=_auth(alice_token))).json()["id"]
 
         resp = await client.post(
@@ -244,9 +240,7 @@ class TestRemoveUserPermissions:
         profile = await client.get(f"/api/v1/users/{bob_id}", headers=_auth(super_token))
         assert profile.json()["permissions"] == ["document:create"]
 
-    async def test_removing_ungranted_permission_is_idempotent(
-        self, client, db_session, permission_codes
-    ):
+    async def test_removing_ungranted_permission_is_idempotent(self, client, db_session, permission_codes):
         super_token = await _superuser_token(client, db_session, "root-perm7@test.com")
         org = await _create_org(client, super_token, slug="perm-org-g")
         bob_token = await _login_token(client, (await _register(client, "bob-perm7@test.com"))["email"])
@@ -286,9 +280,7 @@ class TestRemoveUserPermissions:
         assert resp.status_code == 404
 
     async def test_requires_superuser(self, client, db_session, permission_codes):
-        alice_token = await _login_token(
-            client, (await _register(client, "alice-perm2@test.com"))["email"]
-        )
+        alice_token = await _login_token(client, (await _register(client, "alice-perm2@test.com"))["email"])
         alice_id = (await client.get("/api/v1/users/me", headers=_auth(alice_token))).json()["id"]
 
         resp = await client.request(

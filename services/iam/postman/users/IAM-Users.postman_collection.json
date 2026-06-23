@@ -1,0 +1,1152 @@
+{
+  "info": {
+    "name": "IAM Service — User API",
+    "_postman_id": "b6f6b1f0-8b3a-4b1e-9b0e-iam-users-0001",
+    "description": "Exercises every /api/v1/users endpoint implemented in app/api/v1/routes/users.py, plus the minimal auth/org/role scaffolding needed to reach them.\n\n**Prerequisites (do these once, outside Postman):**\n1. Run the service: `uv run uvicorn app.main:app --reload --port 8000`.\n2. Create a superuser (no HTTP endpoint can bootstrap the first one):\n   `uv run python scripts/create_superuser.py admin@example.com ChangeMe123!`\n   Update the `superuser_email` / `superuser_password` collection variables if you used different values.\n3. (Optional, only needed for the \"4. Permissions\" folder) Seed the platform permission catalog — there is no HTTP endpoint for this either:\n   ```\n   uv run python3 -c \"\n   import asyncio\n   from app.infrastructure.db.session import async_session_factory\n   from app.services.rbac_seed import seed_rbac_catalog\n   async def main():\n       async with async_session_factory() as s:\n           await seed_rbac_catalog(s)\n           await s.commit()\n   asyncio.run(main())\n   \"\n   ```\n\n**Auto token handling:**\n- Every Login/Register request's *Test* script captures `access_token`/`refresh_token`/the user's `id` into collection variables for that actor (`member_*`, `superuser_*`) — no manual copy/paste between requests.\n- A **collection-level pre-request script** runs before every request below: it decodes the relevant actor's stored access token, and if it's missing or within 5 seconds of expiring, transparently calls `POST /auth/refresh` and overwrites the stored token before the actual request fires. So you can leave this running (e.g. via Collection Runner) past a token's lifetime without it ever 401ing on expiry.\n- Re-running the whole collection is safe: emails/usernames/org slugs are suffixed with `Date.now()` in pre-request scripts so nothing collides with a previous run.\n\nRun order matters: folders are numbered and build on each other (Setup creates the org + actors that later folders mutate). Use Collection Runner or run folders top-to-bottom.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Collection-level: auto-detect a near-expired/missing access token for",
+          "// the current actor(s) and silently refresh it via POST /auth/refresh",
+          "// before the request runs, so nothing below ever has to manually",
+          "// re-paste a token after it expires.",
+          "function base64UrlDecode(input) {",
+          "    input = input.replace(/-/g, '+').replace(/_/g, '/');",
+          "    while (input.length % 4) { input += '='; }",
+          "    return decodeURIComponent(",
+          "        atob(input).split('').map(function (c) {",
+          "            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);",
+          "        }).join('')",
+          "    );",
+          "}",
+          "",
+          "function isExpiredOrMissing(token) {",
+          "    if (!token) return true;",
+          "    var parts = token.split('.');",
+          "    if (parts.length !== 3) return true;",
+          "    try {",
+          "        var payload = JSON.parse(base64UrlDecode(parts[1]));",
+          "        return !payload.exp || (payload.exp * 1000) < (Date.now() + 5000);",
+          "    } catch (e) {",
+          "        return true;",
+          "    }",
+          "}",
+          "",
+          "function refreshActor(actor, cb) {",
+          "    var accessVar = actor + '_access_token';",
+          "    var refreshVar = actor + '_refresh_token';",
+          "    var accessToken = pm.collectionVariables.get(accessVar);",
+          "    var refreshToken = pm.collectionVariables.get(refreshVar);",
+          "",
+          "    if (!refreshToken || !isExpiredOrMissing(accessToken)) {",
+          "        return cb();",
+          "    }",
+          "",
+          "    pm.sendRequest({",
+          "        url: pm.collectionVariables.get('base_url') + '/api/v1/auth/refresh',",
+          "        method: 'POST',",
+          "        header: { 'Content-Type': 'application/json' },",
+          "        body: { mode: 'raw', raw: JSON.stringify({ refresh_token: refreshToken }) }",
+          "    }, function (err, res) {",
+          "        if (!err && res && res.code === 200) {",
+          "            var json = res.json();",
+          "            pm.collectionVariables.set(accessVar, json.access_token);",
+          "            pm.collectionVariables.set(refreshVar, json.refresh_token);",
+          "            console.log('[auto-refresh] ' + actor + ' access token refreshed');",
+          "        } else {",
+          "            console.log('[auto-refresh] ' + actor + ' refresh skipped/failed (continuing with existing token)');",
+          "        }",
+          "        cb();",
+          "    });",
+          "}",
+          "",
+          "// The Setup folder's own Login/Register/Refresh requests establish or",
+          "// rotate tokens directly via their own Test scripts below — skip",
+          "// auto-refresh for those so we don't step on a request whose whole",
+          "// job is defining the token.",
+          "var requestName = pm.info.requestName || '';",
+          "if (!/^(Login|Register|Refresh)/i.test(requestName)) {",
+          "    refreshActor('member', function () {",
+          "        refreshActor('superuser', function () {});",
+          "    });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "superuser_email", "value": "admin@example.com" },
+    { "key": "superuser_password", "value": "ChangeMe123!" },
+    { "key": "superuser_access_token", "value": "" },
+    { "key": "superuser_refresh_token", "value": "" },
+    { "key": "superuser_user_id", "value": "" },
+    { "key": "member_email", "value": "" },
+    { "key": "member_password", "value": "" },
+    { "key": "member_access_token", "value": "" },
+    { "key": "member_refresh_token", "value": "" },
+    { "key": "member_user_id", "value": "" },
+    { "key": "org_name", "value": "" },
+    { "key": "org_slug", "value": "" },
+    { "key": "organization_id", "value": "" },
+    { "key": "member_role_id", "value": "" },
+    { "key": "admin_role_id", "value": "" },
+    { "key": "guest_role_id", "value": "" },
+    { "key": "session_id", "value": "" },
+    { "key": "created_user_id", "value": "" },
+    { "key": "created_user_email", "value": "" },
+    { "key": "outsider_email", "value": "" },
+    { "key": "outsider_password", "value": "" },
+    { "key": "outsider_user_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Setup",
+      "description": "Bootstraps everything the later folders need: a logged-in superuser, a fresh member account, an organization the member belongs to, and the seeded global role catalog.",
+      "item": [
+        {
+          "name": "Login Superuser",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Superuser login succeeded', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('superuser_access_token', body.access_token);",
+                  "pm.collectionVariables.set('superuser_refresh_token', body.refresh_token);",
+                  "if (body.user && body.user.id) {",
+                  "    pm.collectionVariables.set('superuser_user_id', body.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{superuser_email}}\",\n  \"password\": \"{{superuser_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Requires the account named by superuser_email/superuser_password to already exist and have is_superuser=true — see the collection description for `scripts/create_superuser.py`."
+          }
+        },
+        {
+          "name": "Register Member User",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('member_email', 'member.' + ts + '@example.com');",
+                  "pm.collectionVariables.set('member_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Member registered', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "pm.collectionVariables.set('member_user_id', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\",\n  \"full_name\": \"Jane Doe\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            }
+          }
+        },
+        {
+          "name": "Login Member User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Member login succeeded', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    pm.expect(body.access_token).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);",
+                  "if (body.user && body.user.id) {",
+                  "    pm.collectionVariables.set('member_user_id', body.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "Create Organization (superuser)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('org_slug', 'acme-' + ts);",
+                  "pm.collectionVariables.set('org_name', 'Acme Corp');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Organization created', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "pm.collectionVariables.set('organization_id', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{org_name}}\",\n  \"slug\": \"{{org_slug}}\",\n  \"description\": \"Postman collection test org\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations"]
+            }
+          }
+        },
+        {
+          "name": "Add Member To Organization (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Member added to org', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{member_user_id}}\",\n  \"role_code\": \"member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/organizations/{{organization_id}}/members",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "organizations", "{{organization_id}}", "members"]
+            }
+          }
+        },
+        {
+          "name": "Login Member User (tenant-bound)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Tenant-bound login succeeded', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "    // tenant_id isn't duplicated in body.user.tenant — it's already",
+                  "    // the access token's own tenant_id claim.",
+                  "    var claims = JSON.parse(atob(body.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                  "    pm.expect(claims.tenant_id).to.equal(pm.collectionVariables.get('org_slug'));",
+                  "});",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"{{member_password}}\",\n  \"tenant_id\": \"{{org_slug}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "login"]
+            },
+            "description": "Re-logs in now that the member has a tenant membership, so the access token carries a tenant_id claim — GET /users/me and the permission-grant endpoints below need that to resolve tenant/role/permissions context."
+          }
+        },
+        {
+          "name": "Seed Global Roles (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Roles seeded', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "});",
+                  "var roles = pm.response.json();",
+                  "roles.forEach(function (r) {",
+                  "    if (r.code === 'member') pm.collectionVariables.set('member_role_id', r.id);",
+                  "    if (r.code === 'admin') pm.collectionVariables.set('admin_role_id', r.id);",
+                  "    if (r.code === 'guest') pm.collectionVariables.set('guest_role_id', r.id);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/roles/seed",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "roles", "seed"]
+            },
+            "description": "Idempotent — creates the global admin/member/guest roles if missing. Needed before '3. Roles' can assign one to the member by code."
+          }
+        },
+        {
+          "name": "Refresh Member Access Token (manual demo)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Refreshed', function () {",
+                  "    pm.expect(pm.response.code).to.equal(200);",
+                  "});",
+                  "pm.collectionVariables.set('member_access_token', body.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', body.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{member_refresh_token}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/refresh",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "refresh"]
+            },
+            "description": "Not required for normal runs — the collection-level pre-request script already does this automatically for both actors whenever a stored access token is within 5s of expiring. Kept here as an explicit, on-demand way to rotate it."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Profile",
+      "item": [
+        {
+          "name": "Get My Profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Returns the Common User Object', function () {",
+                  "    var body = pm.response.json();",
+                  "    pm.expect(body.email).to.equal(pm.collectionVariables.get('member_email'));",
+                  "    pm.expect(body).to.have.property('permissions');",
+                  "    pm.expect(body).to.have.property('attributes');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/me",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "me"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. User CRUD",
+      "item": [
+        {
+          "name": "Create User (superuser)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('created_user_email', 'jane.' + Date.now() + '@applecorp.com');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('User created', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "pm.collectionVariables.set('created_user_id', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Jane Smith\",\n  \"email\": \"{{created_user_email}}\",\n  \"username\": \"janesmith-{{$timestamp}}\",\n  \"phone\": \"+8801711122233\",\n  \"tenant_id\": \"{{org_slug}}\",\n  \"role\": \"member\",\n  \"attributes\": {\n    \"department\": \"Engineering\",\n    \"designation\": \"Developer\",\n    \"location\": \"Dhaka\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users"]
+            },
+            "description": "Superuser-only — provisions a user directly into {{org_slug}} (see UserCreateRequest)."
+          }
+        },
+        {
+          "name": "List Users (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, array body', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users?q=jane&limit=50&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users"],
+              "query": [
+                { "key": "q", "value": "jane" },
+                { "key": "limit", "value": "50" },
+                { "key": "offset", "value": "0" }
+              ]
+            },
+            "description": "NOTE: the live implementation takes q/limit/offset (cursor-style), not the spec doc's page/page_size/status/role/department filters."
+          }
+        },
+        {
+          "name": "Search Users (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, array of Common User Objects', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/search?q=jane",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "search"],
+              "query": [{ "key": "q", "value": "jane" }]
+            }
+          }
+        },
+        {
+          "name": "Get User By ID (self)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}?tenant_id={{org_slug}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}"],
+              "query": [{ "key": "tenant_id", "value": "{{org_slug}}" }]
+            }
+          }
+        },
+        {
+          "name": "Update User (self)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, name updated', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().full_name).to.equal('Jane Updated');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{member_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Jane Updated\",\n  \"phone\": \"+8801711111111\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}"]
+            },
+            "description": "NOTE: the spec doc says PUT — the live route is PATCH (partial update; also doesn't accept attributes here, see the next request)."
+          }
+        },
+        {
+          "name": "Update User Attributes (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, attributes merged', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().attributes.department).to.equal('Operations');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"attributes\": {\n    \"department\": \"Operations\",\n    \"designation\": \"Lead\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/attributes",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "attributes"]
+            },
+            "description": "Admin-only ABAC attribute patch — merged into the existing attribute bag, never a full replace."
+          }
+        },
+        {
+          "name": "Deactivate User (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, inactive', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().is_active).to.equal(false);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/deactivate",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "deactivate"]
+            }
+          }
+        },
+        {
+          "name": "Activate User (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, active again', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().is_active).to.equal(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/activate",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "activate"]
+            }
+          }
+        },
+        {
+          "name": "Update User Status — Suspend (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, SUSPENDED', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().status).to.equal('SUSPENDED');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"SUSPENDED\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/status",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "status"]
+            },
+            "description": "Allowed values: ACTIVE, INACTIVE, SUSPENDED, LOCKED, PENDING_VERIFICATION, DELETED. Every non-ACTIVE status blocks the account's API access — the next request reactivates it so later folders can keep using member_access_token."
+          }
+        },
+        {
+          "name": "Update User Status — Reactivate (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, ACTIVE', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().status).to.equal('ACTIVE');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"ACTIVE\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/status",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "status"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Roles",
+      "description": "Global (platform-wide) role assignment — distinct from the org-scoped membership role set in '0. Setup'. See app/services/role_service.py.",
+      "item": [
+        {
+          "name": "Assign Global Role To User (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', function () {",
+                  "    pm.response.to.have.status(201);",
+                  "    pm.expect(pm.response.json().role).to.equal('member');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "roles"]
+            }
+          }
+        },
+        {
+          "name": "Assign Global Role To User — Duplicate (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict — already assigned', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"member\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/roles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "roles"]
+            }
+          }
+        },
+        {
+          "name": "Remove Global Role From User (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().success).to.equal(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/roles/{{member_role_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "roles", "{{member_role_id}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Permissions",
+      "description": "Direct, org-scoped permission grants — independent of role. Requires the platform permission catalog to exist (see the collection description's step 3) or these 404 with 'unknown permission code'.",
+      "item": [
+        {
+          "name": "Add Permissions To User (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().permissions).to.include('organizations:read');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"permissions\": [\"users:read\", \"organizations:read\"]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/permissions?tenant_id={{org_slug}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "permissions"],
+              "query": [{ "key": "tenant_id", "value": "{{org_slug}}" }]
+            }
+          }
+        },
+        {
+          "name": "Remove Permissions From User (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().success).to.equal(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"permissions\": [\"organizations:read\"]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/permissions?tenant_id={{org_slug}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "permissions"],
+              "query": [{ "key": "tenant_id", "value": "{{org_slug}}" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Sessions",
+      "item": [
+        {
+          "name": "Get User Sessions (self)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK, array of sessions', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "if (body.sessions && body.sessions.length > 0) {",
+                  "    pm.collectionVariables.set('session_id', body.sessions[0].session_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/sessions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "sessions"]
+            }
+          }
+        },
+        {
+          "name": "Revoke User Session (self)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().success).to.equal(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{member_user_id}}/sessions/{{session_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{member_user_id}}", "sessions", "{{session_id}}"]
+            },
+            "description": "Revokes the session captured by 'Get User Sessions' above — if that ran with no active sessions listed, session_id will be empty and this 404s."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Tenant Membership",
+      "description": "Uses a freshly-registered 'outsider' user who isn't a member of {{org_slug}} yet — member_user_id and created_user_id are both already members of it by this point (added in Setup / via Create User's tenant_id), so POST .../tenants against either would 409 as 'already a member' instead of demonstrating the happy path.",
+      "item": [
+        {
+          "name": "Register Outsider User",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ts = Date.now();",
+                  "pm.collectionVariables.set('outsider_email', 'outsider.' + ts + '@example.com');",
+                  "pm.collectionVariables.set('outsider_password', 'Sup3rSecret!23');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Outsider registered', function () {",
+                  "    pm.expect(pm.response.code).to.equal(201);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "pm.collectionVariables.set('outsider_user_id', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{outsider_email}}\",\n  \"password\": \"{{outsider_password}}\",\n  \"full_name\": \"Olivia Outsider\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "register"]
+            },
+            "description": "Has no organization membership at all yet — the clean starting point for POST .../tenants below."
+          }
+        },
+        {
+          "name": "Add User To Tenant (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', function () {",
+                  "    pm.response.to.have.status(201);",
+                  "    pm.expect(pm.response.json().tenant_id).to.equal(pm.collectionVariables.get('org_slug'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{org_slug}}\",\n  \"role\": \"MEMBER\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{outsider_user_id}}/tenants",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{outsider_user_id}}", "tenants"]
+            },
+            "description": "Superuser bypasses the owner-or-superuser gate; a non-superuser caller would need to be {{org_slug}}'s owner."
+          }
+        },
+        {
+          "name": "Remove User From Tenant (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().success).to.equal(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{outsider_user_id}}/tenants/{{org_slug}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{outsider_user_id}}", "tenants", "{{org_slug}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Cleanup",
+      "item": [
+        {
+          "name": "Delete User (superuser)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', function () {",
+                  "    pm.response.to.have.status(204);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superuser_access_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/{{created_user_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "users", "{{created_user_id}}"]
+            },
+            "description": "Removes the throwaway user from 'Create User' — member_user_id is left intact so the collection can be re-run against the same superuser without re-bootstrapping it."
+          }
+        }
+      ]
+    }
+  ]
+}

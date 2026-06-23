@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
-import jwt
 import pytest
-from app.infrastructure.db.models.user import User
+from app.modules.users.models import User
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -26,10 +25,6 @@ async def https_client(app):
 
 def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
-
-
-def _unverified_claims(access_token: str) -> dict:
-    return jwt.decode(access_token, options={"verify_signature": False})
 
 
 async def _register(client, email: str, password: str = "Password123!") -> dict:
@@ -69,12 +64,12 @@ class TestSwitchTenant:
     async def test_switch_to_a_membership_reissues_claims(self, client, db_session):
         email = (await _register(client, "multi@test.com"))["email"]
         first_login = await _login(client, email)
-        await _create_org(client, db_session, first_login["access_token"], name="A", slug="switch-a")
+        await _create_org(client, db_session, first_login["access_token"], name="AA", slug="switch-a")
 
         # Get a second org via another owner, then add this user as a member.
         other_owner = (await _register(client, "otherowner@test.com"))["email"]
         other_token = (await _login(client, other_owner))["access_token"]
-        org_b = await _create_org(client, db_session, other_token, name="B", slug="switch-b")
+        org_b = await _create_org(client, db_session, other_token, name="BB", slug="switch-b")
         user_id = (await client.get("/api/v1/users/me", headers=_auth(first_login["access_token"]))).json()[
             "id"
         ]
@@ -94,12 +89,18 @@ class TestSwitchTenant:
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["tenant_id"] == "switch-b"
-        assert body["role"] == "Member"
+        assert set(body.keys()) == {"access_token"}
 
-        claims = _unverified_claims(body["access_token"])
-        assert claims["tenant_id"] == "switch-b"
-        assert claims["role"] == "Member"
+        # Tenant/role context isn't embedded in the access token itself —
+        # it's resolved dynamically per-request from the session the new
+        # token's session_id points at (see
+        # app.modules.auth.dependencies.get_current_tenant_slug), so
+        # confirm the switch took effect via GET /users/me instead of
+        # decoding the JWT.
+        me = await client.get("/api/v1/users/me", headers=_auth(body["access_token"]))
+        assert me.status_code == 200, me.text
+        assert me.json()["tenant"]["tenant_id"] == "switch-b"
+        assert me.json()["role"]["name"] == "Member"
 
     @pytest.mark.anyio
     async def test_switch_to_non_member_tenant_returns_403(self, client, db_session):
@@ -108,7 +109,7 @@ class TestSwitchTenant:
 
         other_owner = (await _register(client, "otherowner2@test.com"))["email"]
         other_token = (await _login(client, other_owner))["access_token"]
-        await _create_org(client, db_session, other_token, name="C", slug="switch-c")
+        await _create_org(client, db_session, other_token, name="CC", slug="switch-c")
 
         resp = await client.post(
             "/api/v1/auth/switch-tenant",
@@ -142,11 +143,11 @@ class TestSwitchTenant:
         client = https_client
         email = (await _register(client, "rotator@test.com"))["email"]
         first_login = await _login(client, email)
-        await _create_org(client, db_session, first_login["access_token"], name="D", slug="switch-d")
+        await _create_org(client, db_session, first_login["access_token"], name="DD", slug="switch-d")
 
         other_owner = (await _register(client, "otherowner3@test.com"))["email"]
         other_token = (await _login(client, other_owner))["access_token"]
-        org_e = await _create_org(client, db_session, other_token, name="E", slug="switch-e")
+        org_e = await _create_org(client, db_session, other_token, name="EE", slug="switch-e")
         user_id = (await client.get("/api/v1/users/me", headers=_auth(first_login["access_token"]))).json()[
             "id"
         ]
@@ -167,5 +168,8 @@ class TestSwitchTenant:
 
         refresh_resp = await client.post("/api/v1/auth/refresh")
         assert refresh_resp.status_code == 200, refresh_resp.text
-        claims = _unverified_claims(refresh_resp.json()["access_token"])
-        assert claims["tenant_id"] == "switch-e"
+        me = await client.get(
+            "/api/v1/users/me", headers=_auth(refresh_resp.json()["access_token"])
+        )
+        assert me.status_code == 200, me.text
+        assert me.json()["tenant"]["tenant_id"] == "switch-e"

@@ -1,7 +1,7 @@
 """The platform permission catalog — framework-free constants.
 
 Seeded into the `permissions` table (and granted in full to the global
-`admin` role) by `app.services.rbac_seed.seed_rbac_catalog`.
+`admin` role) by `app.core.rbac_seed.seed_rbac_catalog`.
 """
 
 from __future__ import annotations
